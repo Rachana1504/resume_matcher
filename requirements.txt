@@ -1,0 +1,15 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+pydantic==2.8.2
+
+sentence-transformers==2.6.1
+spacy==3.7.4
+skillNer==1.0.3
+
+pymupdf==1.24.7
+python-docx==1.1.2
+docx2txt==0.8
+numpy==1.26.4
+scikit-learn==1.4.2
+python-dateutil==2.9.0.post0

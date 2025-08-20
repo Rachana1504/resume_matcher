@@ -1,0 +1,29 @@
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local uploads & generated files
+uploads/
+*.log
+
+# Virtual environments (if you create one inside the repo)
+.venv/
+venv/
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env files / secrets
+.env
+
+# Build artifacts
+dist/
+build/
+
+# Project-specific (keep fallback cache out of git if it’s generated)
+Dummy_data/jd_cache.json
