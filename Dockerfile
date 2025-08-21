@@ -20,7 +20,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
  && pip install -r requirements.txt
 
-# spaCy model at build time
+# spaCy model at build time (small, CPU-friendly)
 RUN python -m spacy download en_core_web_sm
 
 # (optional) cache SBERT model so runtime has no network fetch
@@ -33,19 +33,9 @@ PY
 COPY . .
 RUN mkdir -p /app/uploads
 
-# healthcheck (optional)
+# Healthcheck (no heredoc; uses curl)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
- CMD python - <<'PY' || exit 1
-import urllib.request, os
-port=os.environ.get("PORT","8000")
-try:
-    with urllib.request.urlopen(f"http://localhost:{port}/", timeout=3) as r:
-        exit(0 if r.status == 200 else 1)
-except Exception:
-    exit(1)
-PY
+  CMD curl -fsS "http://localhost:${PORT:-8000}/" >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini","--"]
-
-# IMPORTANT: bind to $PORT for Render/Cloud
 CMD ["sh","-c","uvicorn app_main:app --host 0.0.0.0 --port ${PORT:-8000}"]
