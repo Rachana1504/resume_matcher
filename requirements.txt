@@ -5,6 +5,7 @@ pydantic==2.8.2
 
 sentence-transformers==2.6.1
 spacy==3.7.4
+blis==0.7.11
 skillNer==1.0.3
 
 pymupdf==1.24.7
