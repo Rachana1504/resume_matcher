@@ -1,257 +1,190 @@
 # extractors.py
-import re, fitz, docx, dateutil.parser
+import re
 from datetime import datetime
-from typing import List, Tuple, Dict, Optional
-from skillNer.general_params import SKILL_DB
-from skillNer.skill_extractor_class import SkillExtractor
-from spacy.matcher import PhraseMatcher
-import spacy
+from functools import lru_cache
+from typing import List, Tuple, Dict, Any
 
-# ---------- NLP / Models ----------
-nlp = spacy.load("en_core_web_sm")
-skill_extractor = SkillExtractor(nlp, SKILL_DB, PhraseMatcher)
+import fitz  # PyMuPDF
+import docx
+from dateutil import parser as dparser
+
+# ---------- Lazy SkillNer (no predefined keyword lists) ----------
+@lru_cache(maxsize=1)
+def _lazy_skill_extractor():
+    import spacy
+    from spacy.matcher import PhraseMatcher
+    from skillNer.skill_extractor_class import SkillExtractor
+    from skillNer.general_params import SKILL_DB
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except Exception:
+        nlp = spacy.blank("en")
+    return SkillExtractor(nlp, SKILL_DB, PhraseMatcher)
 
 # ---------- File Readers ----------
 def extract_text(path: str) -> str:
     p = path.lower()
     if p.endswith(".pdf"):
-        return "\n".join(page.get_text() for page in fitz.open(path))
+        doc = fitz.open(path)
+        try:
+            return "\n".join([page.get_text() for page in doc])
+        finally:
+            doc.close()
     if p.endswith(".docx"):
-        return "\n".join(par.text for par in docx.Document(path).paragraphs)
+        d = docx.Document(path)
+        return "\n".join(p.text for p in d.paragraphs)
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
-# ---------- Skills ----------
+# ---------- Skills (SkillNer only) ----------
 def extract_skills(text: str) -> List[str]:
-    """
-    1) skillNer full matches
-    2) High-confidence n-grams
-    3) Fallback: frequent NOUN/PROPN lemmas
-    4) Last resort: top noun chunks (phrases)
-    """
     try:
-        annotations = skill_extractor.annotate(text)
-        res = annotations.get("results", {})
-        out = set(m["doc_node_value"] for m in res.get("full_matches", []))
-
-        for m in res.get("ngram_scored", []):
-            if m.get("score", 0) >= 0.85:
-                out.add(m["doc_node_value"])
-
-        if not out:
-            doc = nlp(text)
-            counts: Dict[str, int] = {}
-            for t in doc:
-                if t.pos_ in ("NOUN", "PROPN") and t.is_alpha and 2 <= len(t.text) <= 30:
-                    w = t.lemma_.lower()
-                    counts[w] = counts.get(w, 0) + 1
-            out = {w for (w, c) in counts.items() if c >= 2}
-
-        if not out:
-            doc = nlp(text)
-            chunks = [c.text.strip().lower() for c in doc.noun_chunks if 3 <= len(c.text) <= 40]
-            for ch in chunks[:25]:
-                out.add(ch)
-
-        return list(out)
+        se = _lazy_skill_extractor()
+        ann = se.annotate(text) or {}
+        # Prefer "results" → "full_matches" if available
+        results = ann.get("results", {})
+        full = results.get("full_matches") or []
+        # fallbacks: some SkillNer versions store flat "results" list
+        if isinstance(results, list):
+            full = results
+        vals = []
+        for it in full:
+            if isinstance(it, dict):
+                vals.append(it.get("doc_node_value") or it.get("skill_name") or it.get("skill") or it.get("label") or "")
+            else:
+                vals.append(str(it))
+        return sorted({s.strip() for s in vals if s})
     except Exception:
         return []
 
-def normalize_skills(skill_list: List[str]) -> set:
-    # normalize heavily; also collapse spaces/hyphens so contains() works later
-    cleaned = set()
-    for s in skill_list:
-        s = str(s).strip().lower()
-        s = re.sub(r"\s+", " ", s)
-        s = re.sub(r"[^a-z0-9]", "", s)
-        if s:
-            cleaned.add(s)
-    return cleaned
+def normalize_skills(skills: List[str]) -> set:
+    out = set()
+    for s in skills or []:
+        k = re.sub(r"[^a-z0-9]+", "", s.lower()).strip()
+        if k:
+            out.add(k)
+    return out
 
-# ---------- Sections & Date Utilities ----------
-_EDU_HEAD = r"(education|academic|qualification|degree|certification|certifications|education\s*&\s*certifications)"
-_EXP_HEAD = r"(experience|work experience|professional experience|employment|employment history|work history|career|career history|internship|internships|work\s*history|experience\s*summary)"
-_PROJ_HEAD = r"(project|projects|publications|research|thesis|capstone)"
+def clean_entry_name(s: str) -> str:
+    s = re.sub(r"[•\u2022\u2023\u25E6\u2043\u2219]", "", s or "")
+    s = re.sub(r"\s+", " ", s).strip(" -–—|\t")
+    return s.strip()
 
-def extract_sections(text: str) -> Dict[str, List[str]]:
-    sections: Dict[str, List[str]] = {}
-    current: Optional[str] = None
-    patt = re.compile(rf"\b({_EDU_HEAD}|{_EXP_HEAD}|{_PROJ_HEAD})\b", re.I)
-    for raw in text.split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        if patt.search(line):
-            current = line.lower()
-            sections[current] = []
-        elif current:
-            sections[current].append(line)
-    return sections
+# ---------- Multi-range Date Parsing ----------
+MONTHS_RE = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+RANGE_RE = re.compile(
+    rf"(?P<start>(?:{MONTHS_RE}\s+\d{{4}})|(?:\d{{1,2}}[/-]\d{{4}})|(?:\d{{4}}))\s*(?:-|–|—|to|until|through|thru)\s*(?P<end>(?:{MONTHS_RE}\s+\d{{4}})|(?:\d{{1,2}}[/-]\d{{4}})|(?:\d{{4}})|Present|Current|Now)",
+    re.IGNORECASE
+)
 
-SEASON_MONTH_MAP = {"spring": 3, "summer": 6, "fall": 9, "autumn": 9, "winter": 12}
+def _parse_date(s: str) -> datetime | None:
+    s = (s or "").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"(?i)present|current|now", s):
+        return datetime(9999, 1, 1)
+    try:
+        dt = dparser.parse(s, default=datetime(1900, 1, 1), fuzzy=True, dayfirst=False)
+        return dt.replace(day=1)
+    except Exception:
+        return None
 
-def parse_date_range(line: str) -> List[datetime]:
-    # strip bullets
-    line = re.sub(r"[•\u2022\u2023\u25E6\u2043\u2219]", "", line).strip()
-    dates: List[datetime] = []
-
-    # Month Year (Jan 2022), Season Year (Fall 2023)
-    for m in re.findall(r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{4})", line, re.I):
-        try:
-            dates.append(dateutil.parser.parse(f"{m[0]} {m[1]}"))
-        except Exception:
-            pass
-    for m in re.findall(r"(Spring|Summer|Fall|Autumn|Winter)\s+(\d{4})", line, re.I):
-        try:
-            dates.append(datetime(int(m[1]), SEASON_MONTH_MAP.get(m[0].lower(), 1), 1))
-        except Exception:
-            pass
-
-    if re.search(r"\b(present|current)\b", line, re.I):
-        dates.append(datetime.now())
-
-    for sy, ey in re.findall(r"(\d{4})\s*[-–]\s*(\d{4})", line):
-        try:
-            dates.append(datetime(int(sy), 1, 1)); dates.append(datetime(int(ey), 12, 31))
-        except Exception:
-            pass
-
-    # MM/YYYY
-    for mm, yy in re.findall(r"\b(\d{1,2})/(\d{4})\b", line):
-        try:
-            dates.append(datetime(int(yy), int(mm), 1))
-        except Exception:
-            pass
-
-    # Single Year (as part of a range or context)
-    for y in re.findall(r"\b(19|20)\d{2}\b", line):
-        try:
-            dates.append(datetime(int("".join(y)), 1, 1))
-        except Exception:
-            pass
-
-    # unique & sorted
-    uniq = []
-    seen = set()
-    for d in dates:
-        k = (d.year, d.month)
-        if k not in seen:
-            seen.add(k); uniq.append(d)
-    return sorted(uniq)
+def parse_date_range(line: str) -> List[Tuple[Tuple[int,int], datetime, datetime]]:
+    out = []
+    for m in RANGE_RE.finditer(line or ""):
+        start = _parse_date(m.group("start"))
+        end   = _parse_date(m.group("end"))
+        if start and end:
+            out.append((m.span(), start, end))
+    return out
 
 def extract_periods(lines: List[str]) -> List[Tuple[str, datetime, datetime]]:
     periods: List[Tuple[str, datetime, datetime]] = []
-    for line in lines:
-        if not line.strip(): continue
-        ds = parse_date_range(line)
-        if len(ds) >= 2:
-            start, end = ds[0], ds[-1]
-            text = re.sub(r"([A-Za-z]{3,9})\.?\s+\d{4}", "", line, flags=re.I)
-            text = re.sub(r"(Spring|Summer|Fall|Autumn|Winter)\s+\d{4}", "", text, flags=re.I)
-            text = re.sub(r"\b(19|20)\d{2}\b", "", text)
-            text = re.sub(r"\b(present|current)\b", "", text, flags=re.I)
-            text = re.sub(r"[|•\u2022\u2023\u25E6\u2043\u2219]", "", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            if len(text) > 3:
-                periods.append((text, start, end))
+    prev_nonempty = ""
+    for line in lines or []:
+        if not (line and line.strip()):
+            continue
+        ranges = parse_date_range(line)
+        if not ranges:
+            prev_nonempty = line.strip()
+            continue
+        # Handle ALL date ranges found in a single line
+        for span, start, end in ranges:
+            before = line[:span[0]].strip()
+            after  = line[span[1]:].strip()
+            entry  = before or after or prev_nonempty
+            entry  = clean_entry_name(entry) or "Experience"
+            periods.append((entry, start, end))
+        prev_nonempty = line.strip()
 
-    # dedupe by (name,start y/m)
+    # Dedup + sort
     seen, uniq = set(), []
-    for name, s, e in periods:
-        key = (name.lower(), s.year, s.month)
+    for entry, start, end in periods:
+        key = (entry.lower(), start.year, start.month, end.year, end.month)
         if key not in seen:
-            seen.add(key); uniq.append((name, s, e))
-    return sorted(uniq, key=lambda x: x[1])
+            seen.add(key)
+            uniq.append((entry, start, end))
+    uniq.sort(key=lambda x: (x[1], x[2]))
+    return uniq
 
-def extract_periods_anywhere(text: str) -> List[Tuple[str, datetime, datetime]]:
-    """Fallback: scan *all* lines for date ranges, independent of sections."""
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-    return extract_periods(lines)
+# ---------- Gaps & Aggregation ----------
+def _months_between(a: datetime, b: datetime) -> int:
+    return max(0, (b.year - a.year) * 12 + (b.month - a.month))
 
-# ---------- Gaps / Helpers ----------
-def calculate_gaps(periods: List[Tuple[str, datetime, datetime]]):
-    if len(periods) < 2: return None
+def calculate_gaps(periods: List[Tuple[str, datetime, datetime]]) -> List[Dict[str, Any]]:
     gaps = []
-    for i in range(1, len(periods)):
-        p_name, p_start, p_end = periods[i-1]
-        c_name, c_start, c_end = periods[i]
-        if c_start > p_end:
-            gap = (c_start.year - p_end.year)*12 + (c_start.month - p_end.month)
-            if gap > 1:
-                gaps.append({
-                    "between": f"{p_name} → {c_name}",
-                    "gap_months": gap,
-                    "gap_start": p_end.strftime("%b %Y"),
-                    "gap_end": c_start.strftime("%b %Y"),
-                })
-    return gaps or None
+    if not periods:
+        return gaps
+    periods_sorted = sorted(periods, key=lambda x: x[1])
+    for i in range(len(periods_sorted) - 1):
+        end_a   = periods_sorted[i][2]
+        start_b = periods_sorted[i + 1][1]
+        gap = _months_between(end_a, start_b)
+        if gap > 0:
+            gaps.append({"between": f"{periods_sorted[i][0]} → {periods_sorted[i+1][0]}", "gap_months": gap})
+    return gaps
 
-def education_to_first_job_gap(edu_periods, exp_periods):
-    if not edu_periods or not exp_periods: return None
-    last_edu_end = max(edu_periods, key=lambda x: x[2])[2]
-    first_exp_start = min(exp_periods, key=lambda x: x[1])[1]
-    gap = (first_exp_start.year - last_edu_end.year)*12 + (first_exp_start.month - last_edu_end.month)
-    return max(gap, 0)
+def education_to_first_job_gap(edu, exp) -> int | None:
+    if not edu or not exp:
+        return None
+    last_edu_end    = max(e[2] for e in edu)
+    first_job_start = min(e[1] for e in exp)
+    return _months_between(last_edu_end, first_job_start)
 
-def clean_entry_name(entry_text: str) -> str:
-    text = re.sub(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}", "", entry_text, flags=re.I)
-    text = re.sub(r"(Spring|Summer|Fall|Autumn|Winter)\s+\d{4}", "", text, flags=re.I)
-    text = re.sub(r"\b(19|20)\d{2}\b", "", text)
-    text = re.sub(r"\b(present|current)\b", "", text, flags=re.I)
-    text = re.sub(r"[|•\u2022\u2023\u25E6\u2043\u2219]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    parts = re.split(r"[,\n\r|]", text)
-    return (parts[0].strip() if parts else text.strip()) or text.strip()
+HEADERS = ["education","experience","work experience","professional experience","projects","skills","certifications","achievements"]
 
-def is_project(name: str) -> bool:
-    return any(k in name.lower() for k in ["project", "publication", "research", "thesis", "capstone"])
+def _split_sections(text: str) -> Dict[str, List[str]]:
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    sections: Dict[str, List[str]] = {}
+    current = "misc"; sections[current] = []
+    for ln in lines:
+        low = ln.strip().lower()
+        if low in HEADERS:
+            current = low
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(ln)
+    return sections
 
-def is_education_institution(name: str) -> bool:
-    kw = ["university","college","institute","school","academy","polytechnic",
-          "gpa","cgpa","bachelor","master","phd","degree","diploma","high school","b.s.","m.s.","b.a.","m.a."]
-    t = name.lower()
-    return any(k in t for k in kw)
+def is_education_institution(s: str) -> bool:
+    return bool(re.search(r"university|college|institute|school|bachelor|master|bsc|msc|ba|ma|phd|diploma", s, re.I))
 
-# ---------- Bundle ----------
 def extract_resume_data(text: str):
+    sections = _split_sections(text)
     skills = extract_skills(text)
-    sections = extract_sections(text)
 
-    # Education by headings
-    edu_lines: List[str] = []
-    for k in sections.keys():
-        if re.search(_EDU_HEAD, k, re.I):
-            edu_lines.extend(sections[k])
+    edu_lines = list(sections.get("education", []))
+    edu_lines += [ln for ln in sections.get("misc", []) if is_education_institution(ln)]
     edu = extract_periods(edu_lines)
-    edu = [e for e in edu if is_education_institution(e[0]) and not is_project(e[0])]
 
-    # Fallback if empty
-    if not edu:
-        any_periods = extract_periods_anywhere(text)
-        edu = [e for e in any_periods if is_education_institution(e[0])]
-
-    # Deduplicate education by name
-    seen_names, edu_filtered = set(), []
-    for e in edu:
-        nm = clean_entry_name(e[0]).lower()
-        if nm not in seen_names:
-            seen_names.add(nm)
-            edu_filtered.append((clean_entry_name(e[0]), e[1], e[2]))
-
-    # Experience by headings
-    exp_lines: List[str] = []
-    for k in sections.keys():
-        if re.search(_EXP_HEAD, k, re.I):
-            exp_lines.extend(sections[k])
+    exp_lines = sections.get("experience", []) + sections.get("work experience", []) + sections.get("professional experience", [])
+    if not exp_lines:
+        all_lines = [ln for ln in text.splitlines() if ln.strip()]
+        exp_lines = [ln for ln in all_lines if ln not in edu_lines]
     exp = extract_periods(exp_lines)
 
-    # Fallback if empty: anything that's NOT clearly education/project
-    if not exp:
-        any_periods = extract_periods_anywhere(text)
-        exp = [e for e in any_periods if not is_education_institution(e[0]) and not is_project(e[0])]
-
-    gaps_edu = calculate_gaps(edu_filtered)
+    gaps_edu = calculate_gaps(edu)
     gaps_exp = calculate_gaps(exp)
-    edu_to_exp_gap = education_to_first_job_gap(edu_filtered, exp)
+    edu_to_exp_gap = education_to_first_job_gap(edu, exp)
 
-    return skills, edu_filtered, exp, gaps_edu, gaps_exp, edu_to_exp_gap
+    return skills, edu, exp, gaps_edu, gaps_exp, edu_to_exp_gap

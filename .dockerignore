@@ -1,0 +1,15 @@
+.git
+.gitignore
+.vscode
+.idea
+__pycache__/
+*.py[cod]
+*.log
+
+uploads/
+Dummy_data/jd_cache.json
+
+.venv/
+venv/
+.env
+.env.*

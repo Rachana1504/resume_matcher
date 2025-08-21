@@ -1,5 +1,4 @@
 # app_main.py
-import os
 import io
 import csv
 import shutil
@@ -21,18 +20,15 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="Resume–JD Matching Plugin")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-def _serve_app_html():
-    p = (APP_DIR / "app.html")
-    print(">>> Serving UI from:", p.resolve())
-    html = p.read_text(encoding="utf-8")
+def _serve_app_html() -> HTMLResponse:
+    html = (APP_DIR / "app.html").read_text(encoding="utf-8")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
-
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -40,27 +36,18 @@ def index():
 
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page():
-    # Legacy route — same UI
     return _serve_app_html()
 
-# Build a fallback JD cache from local folder once per process
+# Fallback JD cache (local dummy data) created once per process
 jd_cache_fallback = load_or_build_jd_cache(
     jd_dir=str(APP_DIR / "Dummy_data" / "JDS"),
     cache_path=str(APP_DIR / "Dummy_data" / "jd_cache.json"),
 )
 
-def _serve_app_html():
-    p = (APP_DIR / "app.html")
-    print("Serving UI from:", p.resolve())
-    html = p.read_text(encoding="utf-8")
-    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
-
 def _jd_cache_from_uploads(jd_files: List[UploadFile] | None):
     if not jd_files:
         return None
-    named_bytes = []
-    for f in jd_files:
-        named_bytes.append((f.filename, f.file.read()))
+    named_bytes = [(f.filename, f.file.read()) for f in jd_files]
     return build_jd_cache_from_uploads(named_bytes)
 
 def _gaps_html(gaps):
@@ -73,43 +60,29 @@ def _gaps_html(gaps):
 def _periods_html(periods):
     if not periods:
         return "—"
-    return "<br>".join(f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})" for p in periods)
-
-@app.get("/debug/ui-info")
-def ui_info():
-    p = (APP_DIR / "app.html")
-    text = p.read_text(encoding="utf-8")
-    return {
-        "app_main_file": str(Path(__file__).resolve()),
-        "app_html_file": str(p.resolve()),
-        "app_html_has_jd_block": ("Upload Job Description" in text),
-    }
-
+    return "<br>".join(
+        f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})"
+        for p in periods
+    )
 
 @app.post("/upload", response_class=HTMLResponse)
 async def handle_upload(
     resume: UploadFile = File(...),
     jd_files: List[UploadFile] | None = File(None),
 ):
-    """Accept one resume plus optional JD files.
-    Prefer uploaded JDs; fall back to local cache if none uploaded.
-    Returns an HTML table that the front-end parses into cards.
-    """
-    # Save resume to disk (matcher reads from file path)
+    """Accept one resume + optional JD files; return an HTML table for the UI."""
+    # Save resume
     resume_path = str(UPLOAD_DIR / resume.filename)
     with open(resume_path, "wb") as out:
         shutil.copyfileobj(resume.file, out)
 
-    # Prefer JD uploads; fallback to local cache only if none uploaded
-    jd_cache = _jd_cache_from_uploads(jd_files)
-    if not jd_cache:
-        jd_cache = jd_cache_fallback
+    # Prefer uploaded JDs; fallback to local cache only if none uploaded
+    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
 
     # Run matching
     results = match_resume_to_jds(resume_path, jd_cache)
-    
 
-    # Render a simple HTML table (front-end extracts top row to make cards)
+    # Render as a simple HTML table that the front-end parses into cards
     rows_html = []
     for r in results:
         rows_html.append(f"""
@@ -159,14 +132,12 @@ async def download_csv(
         shutil.copyfileobj(resume.file, out)
 
     # Prefer uploaded JDs; fallback to local
-    jd_cache = _jd_cache_from_uploads(jd_files)
-    if not jd_cache:
-        jd_cache = jd_cache_fallback
+    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
 
     # Run matching
     results = match_resume_to_jds(resume_path, jd_cache)
 
-    # Stream a CSV
+    # Stream CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
