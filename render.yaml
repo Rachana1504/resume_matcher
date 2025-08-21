@@ -3,7 +3,7 @@ services:
     name: resume_matcher
     env: docker
     plan: free
-    branch: main
     rootDir: .
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
     autoDeploy: true
-    healthCheckPath: /

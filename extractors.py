@@ -1,190 +1,195 @@
-# extractors.py
+import os
 import re
-from datetime import datetime
-from functools import lru_cache
-from typing import List, Tuple, Dict, Any
+import io
+from typing import List, Tuple, Set, Dict
 
 import fitz  # PyMuPDF
-import docx
-from dateutil import parser as dparser
+import docx2txt
+import spacy
+from spacy.matcher import PhraseMatcher
 
-# ---------- Lazy SkillNer (no predefined keyword lists) ----------
-@lru_cache(maxsize=1)
-def _lazy_skill_extractor():
-    import spacy
-    from spacy.matcher import PhraseMatcher
+# SkillNer
+try:
     from skillNer.skill_extractor_class import SkillExtractor
-    from skillNer.general_params import SKILL_DB
-    try:
-        nlp = spacy.load("en_core_web_sm")
-    except Exception:
-        nlp = spacy.blank("en")
-    return SkillExtractor(nlp, SKILL_DB, PhraseMatcher)
+except Exception:  # older package naming fallback
+    from skillNer import SkillExtractor  # type: ignore
 
-# ---------- File Readers ----------
-def extract_text(path: str) -> str:
-    p = path.lower()
-    if p.endswith(".pdf"):
-        doc = fitz.open(path)
-        try:
-            return "\n".join([page.get_text() for page in doc])
-        finally:
-            doc.close()
-    if p.endswith(".docx"):
-        d = docx.Document(path)
-        return "\n".join(p.text for p in d.paragraphs)
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
+# ---------- file -> text ----------
 
-# ---------- Skills (SkillNer only) ----------
-def extract_skills(text: str) -> List[str]:
-    try:
-        se = _lazy_skill_extractor()
-        ann = se.annotate(text) or {}
-        # Prefer "results" → "full_matches" if available
-        results = ann.get("results", {})
-        full = results.get("full_matches") or []
-        # fallbacks: some SkillNer versions store flat "results" list
-        if isinstance(results, list):
-            full = results
-        vals = []
-        for it in full:
-            if isinstance(it, dict):
-                vals.append(it.get("doc_node_value") or it.get("skill_name") or it.get("skill") or it.get("label") or "")
-            else:
-                vals.append(str(it))
-        return sorted({s.strip() for s in vals if s})
-    except Exception:
-        return []
+ALLOWED_EXT = {".pdf", ".docx", ".txt"}
 
-def normalize_skills(skills: List[str]) -> set:
-    out = set()
-    for s in skills or []:
-        k = re.sub(r"[^a-z0-9]+", "", s.lower()).strip()
-        if k:
-            out.add(k)
-    return out
+def load_text_from_file(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return _pdf_text(path)
+    if ext == ".docx":
+        return _docx_text(path)
+    if ext == ".txt":
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    raise ValueError(f"Unsupported file type: {ext}")
 
-def clean_entry_name(s: str) -> str:
-    s = re.sub(r"[•\u2022\u2023\u25E6\u2043\u2219]", "", s or "")
-    s = re.sub(r"\s+", " ", s).strip(" -–—|\t")
-    return s.strip()
+def _pdf_text(path: str) -> str:
+    text = []
+    with fitz.open(path) as doc:
+        for page in doc:
+            text.append(page.get_text())
+    return "\n".join(text)
 
-# ---------- Multi-range Date Parsing ----------
-MONTHS_RE = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-RANGE_RE = re.compile(
-    rf"(?P<start>(?:{MONTHS_RE}\s+\d{{4}})|(?:\d{{1,2}}[/-]\d{{4}})|(?:\d{{4}}))\s*(?:-|–|—|to|until|through|thru)\s*(?P<end>(?:{MONTHS_RE}\s+\d{{4}})|(?:\d{{1,2}}[/-]\d{{4}})|(?:\d{{4}})|Present|Current|Now)",
-    re.IGNORECASE
+def _docx_text(path: str) -> str:
+    # docx2txt is robust for mixed runs and tables
+    return docx2txt.process(path) or ""
+
+# ---------- NLP init (spaCy + SkillNer) ----------
+
+_NLP = None
+_SKILL_EXTRACTOR = None
+
+def _get_nlp():
+    global _NLP
+    if _NLP is None:
+        _NLP = spacy.load("en_core_web_sm")
+    return _NLP
+
+def _get_skill_extractor():
+    """Build SkillExtractor once. Uses SkillNer’s built-in DB and matchers."""
+    global _SKILL_EXTRACTOR
+    if _SKILL_EXTRACTOR is None:
+        nlp = _get_nlp()
+        _SKILL_EXTRACTOR = SkillExtractor(nlp)  # default DB & matchers
+    return _SKILL_EXTRACTOR
+
+# ---------- skill extraction (SkillNer) ----------
+
+def extract_skills(text: str) -> Set[str]:
+    """
+    Use SkillNer to annotate skills, merging all result buckets.
+    Works across SkillNer 1.0.x variants by being defensive with keys.
+    """
+    text = (text or "").strip()
+    if not text:
+        return set()
+    se = _get_skill_extractor()
+    ann = se.annotate(text)  # type: ignore
+
+    buckets = []
+    results = ann.get("results") or {}
+    # Collect any list under results
+    for v in results.values():
+        if isinstance(v, list):
+            buckets.extend(v)
+
+    found: Set[str] = set()
+    for item in buckets:
+        if not isinstance(item, dict):
+            continue
+        # common keys across SkillNer outputs
+        for k in ("doc_node_value", "skill", "skill_name", "ngram", "text"):
+            if k in item and item[k]:
+                found.add(str(item[k]).strip().lower())
+                break
+
+    # fallback: noun chunks (if SkillNer finds nothing)
+    if not found:
+        nlp = _get_nlp()
+        doc = nlp(text)
+        for nc in doc.noun_chunks:
+            s = re.sub(r"[^a-z0-9+\-#/. ]", "", nc.text.lower())
+            s = re.sub(r"\s+", " ", s).strip()
+            if len(s) > 1 and " " in s:
+                found.add(s)
+
+    return found
+
+# ---------- date/period parsing ----------
+
+_MONTH = r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_YEAR  = r"(20\d{2}|19\d{2})"
+# forms: Jan 2020 — Mar 2021, Jan-2020 to Mar-2021, Jan 2020 – Present, 2020 - 2022, etc.
+PERIOD_RE = re.compile(
+    rf"(?P<m1>{_MONTH})\s*[-/ ]?\s*(?P<y1>{_YEAR})\s*(?:[–—\-to]+)\s*(?:(?P<m2>{_MONTH})\s*[-/ ]?\s*(?P<y2>{_YEAR})|(?P<present>present|current))",
+    re.IGNORECASE,
 )
 
-def _parse_date(s: str) -> datetime | None:
-    s = (s or "").strip()
-    if not s:
-        return None
-    if re.fullmatch(r"(?i)present|current|now", s):
-        return datetime(9999, 1, 1)
-    try:
-        dt = dparser.parse(s, default=datetime(1900, 1, 1), fuzzy=True, dayfirst=False)
-        return dt.replace(day=1)
-    except Exception:
-        return None
+# year-only backup
+YEAR_RANGE_RE = re.compile(rf"(?P<y1>{_YEAR})\s*[–—\-to]+\s*(?P<y2>{_YEAR}|present|current)", re.IGNORECASE)
 
-def parse_date_range(line: str) -> List[Tuple[Tuple[int,int], datetime, datetime]]:
-    out = []
-    for m in RANGE_RE.finditer(line or ""):
-        start = _parse_date(m.group("start"))
-        end   = _parse_date(m.group("end"))
-        if start and end:
-            out.append((m.span(), start, end))
-    return out
+_MONTH_NUM = {
+    "jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,"apr":4,"april":4,
+    "may":5,"jun":6,"june":6,"jul":7,"july":7,"aug":8,"august":8,"sep":9,"sept":9,
+    "september":9,"oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12
+}
 
-def extract_periods(lines: List[str]) -> List[Tuple[str, datetime, datetime]]:
-    periods: List[Tuple[str, datetime, datetime]] = []
-    prev_nonempty = ""
-    for line in lines or []:
-        if not (line and line.strip()):
-            continue
-        ranges = parse_date_range(line)
-        if not ranges:
-            prev_nonempty = line.strip()
-            continue
-        # Handle ALL date ranges found in a single line
-        for span, start, end in ranges:
-            before = line[:span[0]].strip()
-            after  = line[span[1]:].strip()
-            entry  = before or after or prev_nonempty
-            entry  = clean_entry_name(entry) or "Experience"
-            periods.append((entry, start, end))
-        prev_nonempty = line.strip()
+def _ym_to_ord(y:int, m:int) -> int:
+    return y*12 + (m-1)
 
-    # Dedup + sort
-    seen, uniq = set(), []
-    for entry, start, end in periods:
-        key = (entry.lower(), start.year, start.month, end.year, end.month)
+def _months_between(start: Tuple[int,int], end: Tuple[int,int]) -> int:
+    y1,m1 = start; y2,m2 = end
+    return max(0, _ym_to_ord(y2,m2) - _ym_to_ord(y1,m1))
+
+def extract_periods(text: str) -> List[Tuple[str,str]]:
+    """
+    Returns list of ('Mon YYYY', 'Mon YYYY/Present') strings found anywhere in the text.
+    """
+    out: List[Tuple[str,str]] = []
+    for m in PERIOD_RE.finditer(text):
+        m1, y1 = m.group("m1"), int(m.group("y1"))
+        if m.group("present"):
+            out.append((f"{m1} {y1}", "Present"))
+        else:
+            m2, y2 = m.group("m2"), int(m.group("y2"))
+            out.append((f"{m1} {y1}", f"{m2} {y2}"))
+    # backup: year ranges
+    for m in YEAR_RANGE_RE.finditer(text):
+        y1 = int(m.group("y1"))
+        y2s = m.group("y2")
+        if y2s.lower() in ("present","current"):
+            out.append((f"Jan {y1}", "Present"))
+        else:
+            y2 = int(y2s)
+            out.append((f"Jan {y1}", f"Jan {y2}"))
+    # dedupe preserving order
+    seen = set()
+    final = []
+    for a,b in out:
+        key = (a.lower(), b.lower())
         if key not in seen:
-            seen.add(key)
-            uniq.append((entry, start, end))
-    uniq.sort(key=lambda x: (x[1], x[2]))
-    return uniq
+            seen.add(key); final.append((a,b))
+    return final
 
-# ---------- Gaps & Aggregation ----------
-def _months_between(a: datetime, b: datetime) -> int:
-    return max(0, (b.year - a.year) * 12 + (b.month - a.month))
-
-def calculate_gaps(periods: List[Tuple[str, datetime, datetime]]) -> List[Dict[str, Any]]:
+def months_gap_chain(periods: List[Tuple[str,str]]) -> List[int]:
+    """
+    Given periods [('Jun 2016','Aug 2019'), ('Sep 2019','Feb 2021'), ...] sorted by start ascending,
+    return list of gaps in months between consecutive periods.
+    """
+    norm = []
+    for a,b in periods:
+        sa = _to_y_m(a)
+        sb = _to_y_m(b)
+        if sa and sb:
+            norm.append((sa,sb))
+    norm.sort(key=lambda p: p[0])  # by start
     gaps = []
-    if not periods:
-        return gaps
-    periods_sorted = sorted(periods, key=lambda x: x[1])
-    for i in range(len(periods_sorted) - 1):
-        end_a   = periods_sorted[i][2]
-        start_b = periods_sorted[i + 1][1]
-        gap = _months_between(end_a, start_b)
-        if gap > 0:
-            gaps.append({"between": f"{periods_sorted[i][0]} → {periods_sorted[i+1][0]}", "gap_months": gap})
+    for i in range(1, len(norm)):
+        prev_end = norm[i-1][1]
+        curr_start = norm[i][0]
+        # if overlap, gap is 0
+        gap = max(0, _ym_to_ord(curr_start[0], curr_start[1]) - _ym_to_ord(prev_end[0], prev_end[1]))
+        gaps.append(gap)
     return gaps
 
-def education_to_first_job_gap(edu, exp) -> int | None:
-    if not edu or not exp:
-        return None
-    last_edu_end    = max(e[2] for e in edu)
-    first_job_start = min(e[1] for e in exp)
-    return _months_between(last_edu_end, first_job_start)
-
-HEADERS = ["education","experience","work experience","professional experience","projects","skills","certifications","achievements"]
-
-def _split_sections(text: str) -> Dict[str, List[str]]:
-    lines = [ln.strip() for ln in (text or "").splitlines()]
-    sections: Dict[str, List[str]] = {}
-    current = "misc"; sections[current] = []
-    for ln in lines:
-        low = ln.strip().lower()
-        if low in HEADERS:
-            current = low
-            sections.setdefault(current, [])
-        else:
-            sections.setdefault(current, []).append(ln)
-    return sections
-
-def is_education_institution(s: str) -> bool:
-    return bool(re.search(r"university|college|institute|school|bachelor|master|bsc|msc|ba|ma|phd|diploma", s, re.I))
-
-def extract_resume_data(text: str):
-    sections = _split_sections(text)
-    skills = extract_skills(text)
-
-    edu_lines = list(sections.get("education", []))
-    edu_lines += [ln for ln in sections.get("misc", []) if is_education_institution(ln)]
-    edu = extract_periods(edu_lines)
-
-    exp_lines = sections.get("experience", []) + sections.get("work experience", []) + sections.get("professional experience", [])
-    if not exp_lines:
-        all_lines = [ln for ln in text.splitlines() if ln.strip()]
-        exp_lines = [ln for ln in all_lines if ln not in edu_lines]
-    exp = extract_periods(exp_lines)
-
-    gaps_edu = calculate_gaps(edu)
-    gaps_exp = calculate_gaps(exp)
-    edu_to_exp_gap = education_to_first_job_gap(edu, exp)
-
-    return skills, edu, exp, gaps_edu, gaps_exp, edu_to_exp_gap
+def _to_y_m(s: str) -> Tuple[int,int] | None:
+    s = s.strip()
+    if s.lower() in ("present","current"):
+        from datetime import datetime
+        now = datetime.utcnow()
+        return (now.year, now.month)
+    m = re.search(rf"{_MONTH}\s+({_YEAR})", s, re.IGNORECASE)
+    if m:
+        mo = _MONTH_NUM[m.group(1).lower()]
+        yr = int(m.group(2))
+        return (yr, mo)
+    m = re.search(rf"({_YEAR})", s)
+    if m:
+        return (int(m.group(1)), 1)
+    return None

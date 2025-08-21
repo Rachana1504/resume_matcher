@@ -18,24 +18,18 @@ WORKDIR /app
 # ---- Python deps ----
 COPY requirements.txt .
 RUN pip install --upgrade pip \
- && pip install -r requirements.txt
-
-# spaCy model at build time (small, CPU-friendly)
-RUN python -m spacy download en_core_web_sm
-
-# (optional) cache SBERT model so runtime has no network fetch
-RUN python - <<'PY'
-from sentence_transformers import SentenceTransformer
-SentenceTransformer("all-MiniLM-L6-v2")
-PY
+ && pip install -r requirements.txt \
+ && python -m spacy download en_core_web_sm
 
 # ---- app code ----
 COPY . .
 RUN mkdir -p /app/uploads
 
-# Healthcheck (no heredoc; uses curl)
+# simple healthcheck using curl
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-  CMD curl -fsS "http://localhost:${PORT:-8000}/" >/dev/null || exit 1
+  CMD curl -fsS http://localhost:${PORT:-8000}/healthz || exit 1
 
 ENTRYPOINT ["/usr/bin/tini","--"]
+
+# IMPORTANT for Render/Cloud: bind to $PORT
 CMD ["sh","-c","uvicorn app_main:app --host 0.0.0.0 --port ${PORT:-8000}"]
