@@ -2,339 +2,225 @@
 <html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Resume ↔ JD Matcher</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Resume–JD Matching Plugin</title>
+  <meta http-equiv="Cache-Control" content="no-store" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
   <style>
-    :root{
-      --primary:#0f62fe;
-      --bg:#f6f8fb;
-      --card:#ffffff;
-      --muted:#6b7280;
-      --border:#e5e7eb;
-      --ok:#16a34a;
-      --warn:#b45309;
-      --err:#dc2626;
-      --shadow:0 10px 25px rgba(0,0,0,.06);
-      --radius:18px;
-    }
+    :root{--bar:#0b4a86;--accent:#1e88e5;--bg:#eef5ff;--card:#fff;--muted:#5b6b80;--border:#d9e3f0}
     *{box-sizing:border-box}
-    html,body{height:100%}
-    body{
-      margin:0;
-      font-family:'Inter',system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-      background:linear-gradient(180deg,#f9fbff 0%, #eef2ff 100%);
-      color:#111827;
-    }
-    .container{
-      max-width:1100px;margin:0 auto;padding:32px 20px 80px;
-    }
-    header{
-      display:flex;align-items:center;gap:14px;margin-bottom:22px;
-    }
-    .logo{
-      width:44px;height:44px;border-radius:12px;display:grid;place-items:center;
-      background:linear-gradient(135deg,#3b82f6, #8b5cf6);color:#fff;
-      font-weight:800;box-shadow:var(--shadow)
-    }
-    h1{font-size:clamp(22px,2.5vw,30px);margin:0}
-    .sub{color:var(--muted);margin-top:6px}
-
-    .grid{
-      display:grid;grid-template-columns:1.2fr .8fr;gap:18px;margin-top:18px;
-    }
-    .card{
-      background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
-      box-shadow:var(--shadow);padding:18px;
-    }
-    .card h2{margin:0 0 10px;font-size:18px}
-    .hint{color:var(--muted);font-size:13px;margin:8px 0 12px}
-
-    .drop{
-      border:2px dashed #c7d2fe;border-radius:16px;background:#f8fafc;
-      padding:18px;display:flex;flex-direction:column;align-items:center;gap:10px;
-      transition:.15s ease-in-out; text-align:center;
-    }
-    .drop.dragover{background:#eef2ff;border-color:#93c5fd}
-    .drop small{color:var(--muted)}
-    .pill{
-      display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;
-      background:#eef2ff;color:#1f2937;font-size:13px;border:1px solid #dbeafe;
-    }
-    input[type="file"]{display:none}
-    .btn{
-      border:none;cursor:pointer;border-radius:12px;padding:10px 14px;
-      font-weight:600;transition:.15s;display:inline-flex;align-items:center;gap:8px;
-    }
-    .btn.primary{background:var(--primary);color:#fff}
-    .btn.ghost{background:#f3f4f6;border:1px solid var(--border)}
-    .btn:disabled{opacity:.6;cursor:not-allowed}
-    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-    .spacer{flex:1}
-    .controls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px}
-    .field{display:flex;flex-direction:column;gap:6px}
-    .field label{font-size:13px;color:#374151}
-    .field input,.field select{
-      padding:10px;border-radius:10px;border:1px solid var(--border);background:#fff;
-    }
-
-    #results{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
-    .result{
-      border:1px solid var(--border);border-radius:16px;background:#fff;padding:14px;box-shadow:var(--shadow)
-    }
-    .score{font-weight:800}
-    .tag{display:inline-block;margin:4px 6px 0 0;padding:6px 10px;border-radius:999px;background:#f1f5f9;font-size:12px}
-    .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
-
-    .busy{
-      position:fixed;inset:0;background:rgba(255,255,255,.75);backdrop-filter:saturate(1.2) blur(2px);
-      display:none;align-items:center;justify-content:center;z-index:50;
-    }
-    .spinner{width:46px;height:46px;border-radius:999px;border:5px solid #e5e7eb;border-top-color:var(--primary);animation:spin 1s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    footer{margin-top:18px;color:var(--muted);font-size:12px;text-align:center}
-    .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-    .filechip{background:#f8fafc;border:1px solid var(--border);padding:6px 10px;border-radius:999px;font-size:12px}
-    @media (max-width:960px){.grid{grid-template-columns:1fr}}
+    body{margin:0;background:linear-gradient(180deg,#f6f9ff 0%, #eef5ff 60%, #ffe9d6 120%);font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;color:#0f172a}
+    header{background:var(--bar);color:#fff;padding:16px 22px;font-weight:700;font-size:20px;display:flex;align-items:center;gap:10px}
+    header small{opacity:.85;font-weight:600;background:#0c5aa8;border-radius:999px;padding:2px 8px}
+    .container{max-width:1040px;margin:18px auto;padding:0 16px}
+    .drop{border:2px dashed #9ec7ff;border-radius:14px;padding:20px;background:#ffffff;text-align:center;transition:.2s}
+    .drop:hover{background:#f4f9ff}
+    .hint{color:var(--muted);font-size:13px;margin-top:6px}
+    input[type=file]{display:none}
+    .btn{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#fff;border:none;border-radius:9px;padding:9px 12px;cursor:pointer;font-weight:600}
+    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0}
+    .controls input,.controls select{padding:6px;border:1px solid var(--border);border-radius:8px;background:#fff}
+    #results{margin-top:12px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:14px; box-shadow:0 8px 20px rgba(15,23,42,.06)}
+    .badge{display:inline-block;background:#eef3fb;border:1px solid #dbe7f9;border-radius:999px;padding:3px 8px;margin:2px;font-size:12px}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #e8eef7;padding:8px;text-align:left}
+    .chips{margin-top:8px}
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <div class="logo">RM</div>
-      <div>
-        <h1>Resume ↔ JD Matcher</h1>
-        <div class="sub">Upload resumes & job descriptions, then run semantic matching. Export CSV results.</div>
-      </div>
-    </header>
+<header>Resume–JD Matching Plugin <small>UI v2025-08-21</small></header>
 
-    <div class="grid">
-      <!-- Left: Uploads -->
-      <section class="card">
-        <h2>1) Upload Files</h2>
-        <div class="hint">Drag & drop or click to select multiple files. Supported: <b>.pdf, .docx, .txt</b></div>
-
-        <div class="row" style="gap:14px;align-items:stretch">
-          <!-- Resumes -->
-          <div style="flex:1;min-width:260px">
-            <div id="dropResumes" class="drop">
-              <div class="pill">📄 Resumes</div>
-              <small>Drop files here or</small>
-              <label class="btn ghost" for="resumeInput">Choose files</label>
-              <input id="resumeInput" type="file" multiple accept=".pdf,.docx,.txt"/>
-              <div id="resumeChips" class="chips"></div>
-            </div>
-          </div>
-
-          <!-- JDs -->
-          <div style="flex:1;min-width:260px">
-            <div id="dropJDs" class="drop">
-              <div class="pill">📝 Job Descriptions</div>
-              <small>Drop files here or</small>
-              <label class="btn ghost" for="jdInput">Choose files</label>
-              <input id="jdInput" type="file" multiple accept=".pdf,.docx,.txt"/>
-              <div id="jdChips" class="chips"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="controls">
-          <div class="field">
-            <label for="minPct">Min Match %</label>
-            <input id="minPct" type="number" min="0" max="100" step="1" value="0" />
-          </div>
-          <div class="field">
-            <label for="minSkills">Min Matched Skills</label>
-            <input id="minSkills" type="number" min="0" step="1" value="0" />
-          </div>
-          <div class="field">
-            <label for="sortBy">Sort By</label>
-            <select id="sortBy">
-              <option value="desc">Highest score first</option>
-              <option value="asc">Lowest score first</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:14px">
-          <button id="matchBtn" class="btn primary">⚡ Match</button>
-          <button id="csvBtn" class="btn ghost">⬇️ Download CSV</button>
-          <span class="spacer"></span>
-          <small class="hint">Uploads are stored inside the server container (ephemeral on free hosting).</small>
-        </div>
-      </section>
-
-      <!-- Right: Live Log / Tips -->
-      <aside class="card">
-        <h2>Tips</h2>
-        <ul style="margin:8px 0 0 18px;line-height:1.6;color:#374151">
-          <li>Upload resumes first, then JDs, then click <b>Match</b>.</li>
-          <li>Use filters to narrow results. CSV respects your latest match run.</li>
-          <li>Large PDFs may take a bit while text is extracted.</li>
-        </ul>
-        <div id="log" class="hint" style="margin-top:14px"></div>
-      </aside>
+<div class="container">
+  <!-- Resume uploader -->
+  <div id="resumeDZ" class="drop">
+    <div><b>📄 Upload Resume(s)</b></div>
+    <div class="hint">Click “Choose File(s)” or drag & drop .pdf / .docx / .txt</div>
+    <div style="margin-top:10px;">
+      <label class="btn" for="resume">Choose File(s)</label>
+      <input id="resume" type="file" accept=".pdf,.docx,.txt" multiple />
     </div>
-
-    <!-- Results -->
-    <section class="card" style="margin-top:18px">
-      <h2>2) Results</h2>
-      <div id="results" class="hint">No results yet. Run a match to see cards here.</div>
-    </section>
-
-    <footer>© <span id="yr"></span> Matcher</footer>
+    <div id="resumeList" class="chips"></div>
   </div>
 
-  <div id="busy" class="busy"><div class="spinner" title="Working…"></div></div>
+  <div style="height:14px;"></div>
 
-  <script>
-    // Helpers
-    const $ = sel => document.querySelector(sel);
-    const busy = $("#busy");
-    const resumeInput = $("#resumeInput");
-    const jdInput = $("#jdInput");
-    const resumeChips = $("#resumeChips");
-    const jdChips = $("#jdChips");
-    const results = $("#results");
-    const logEl = $("#log");
-    $("#yr").textContent = new Date().getFullYear();
+  <!-- JD uploader -->
+  <div id="jdDZ" class="drop">
+    <div><b>🧾 Upload Job Description(s)</b></div>
+    <div class="hint">Click “Choose JD File(s)” or drag & drop .pdf / .docx / .txt</div>
+    <div style="margin-top:10px;">
+      <label class="btn" for="jdFiles">Choose JD File(s)</label>
+      <input id="jdFiles" type="file" accept=".pdf,.docx,.txt" multiple />
+    </div>
+    <div id="jdList" class="chips"></div>
+  </div>
 
-    function setBusy(v){ busy.style.display = v ? "flex" : "none"; }
-    function log(msg){ logEl.innerHTML = (logEl.innerHTML ? logEl.innerHTML + "<br>" : "") + msg; }
-    function clearLog(){ logEl.innerHTML = ""; }
+  <div class="controls">
+    <label>Match % ≥ <input id="minPct" type="number" min="0" max="100" value="0" style="width:76px"></label>
+    <label>Min Skills <input id="minSkills" type="number" min="0" value="0" style="width:76px"></label>
+    <label>Sort by
+      <select id="sortBy">
+        <option value="desc">Score (High → Low)</option>
+        <option value="asc">Score (Low → High)</option>
+      </select>
+    </label>
+    <button id="matchBtn" class="btn">Match</button>
+    <button id="csvBtn" class="btn">📥 Download CSV</button>
+    <span id="status" class="hint"></span>
+  </div>
 
-    function refreshChips(input, chipsEl){
-      chipsEl.innerHTML = "";
-      [...input.files].forEach(f=>{
-        const span = document.createElement("span");
-        span.className = "filechip";
-        span.textContent = `${f.name} (${(f.size/1024).toFixed(0)} KB)`;
-        chipsEl.appendChild(span);
-      });
-    }
+  <div id="results"></div>
+</div>
 
-    resumeInput.addEventListener("change", ()=>refreshChips(resumeInput, resumeChips));
-    jdInput.addEventListener("change", ()=>refreshChips(jdInput, jdChips));
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const resumeInput = $('#resume');
+  const resumeList  = $('#resumeList');
+  const jdInput     = $('#jdFiles');
+  const jdList      = $('#jdList');
+  const statusEl    = $('#status');
 
-    // Drag & Drop
-    function wireDrop(zone, input){
-      ["dragenter","dragover"].forEach(ev=>zone.addEventListener(ev,e=>{
-        e.preventDefault(); e.stopPropagation(); zone.classList.add("dragover");
-      }));
-      ["dragleave","drop"].forEach(ev=>zone.addEventListener(ev,e=>{
-        e.preventDefault(); e.stopPropagation(); if(ev!=="drop") zone.classList.remove("dragover");
-      }));
-      zone.addEventListener("drop", e=>{
-        zone.classList.remove("dragover");
-        const dt = e.dataTransfer;
-        if(!dt?.files?.length) return;
-        // Append files to the input (DataTransfer for merging)
-        const merged = new DataTransfer();
-        [...input.files].forEach(f=>merged.items.add(f));
-        [...dt.files].forEach(f=>merged.items.add(f));
-        input.files = merged.files;
-        input.dispatchEvent(new Event("change"));
-      });
-    }
-    wireDrop($("#dropResumes"), resumeInput);
-    wireDrop($("#dropJDs"), jdInput);
+  function chips(el, files){
+    el.innerHTML = '';
+    [...files].forEach(f => {
+      const s = document.createElement('span');
+      s.className = 'badge';
+      s.textContent = f.name;
+      el.appendChild(s);
+    });
+  }
 
-    async function postForm(url, fd){
-      const r = await fetch(url, { method:"POST", body: fd });
-      if(!r.ok) throw new Error(await r.text());
-      return r.json().catch(()=>({ok:true}));
-    }
+  function wireDrop(zoneEl, inputEl, listEl){
+    zoneEl.addEventListener('dragover', e => { e.preventDefault(); zoneEl.style.background='#f7fbff'; });
+    zoneEl.addEventListener('dragleave', () => { zoneEl.style.background='#fff'; });
+    zoneEl.addEventListener('drop', e => {
+      e.preventDefault(); zoneEl.style.background='#fff';
+      const dt = new DataTransfer();
+      [...inputEl.files].forEach(f => dt.items.add(f));            // keep existing
+      [...e.dataTransfer.files].forEach(f => dt.items.add(f));     // add new
+      inputEl.files = dt.files;
+      chips(listEl, inputEl.files);
+    });
+    // Click anywhere in the drop zone to trigger the hidden input
+    zoneEl.addEventListener('click', (ev) => {
+      // prevent double-open when clicking the label
+      if (ev.target.tagName !== 'LABEL') inputEl.click();
+    });
+  }
 
-    // Upload -> Upload -> Match
-    $("#matchBtn").addEventListener("click", async ()=>{
-      clearLog();
-      if(!resumeInput.files.length){ alert("Please add at least one resume."); return; }
-      if(!jdInput.files.length){ alert("Please upload at least one JD."); return; }
+  resumeInput.addEventListener('change', () => chips(resumeList, resumeInput.files));
+  jdInput.addEventListener('change',     () => chips(jdList, jdInput.files));
+  wireDrop(document.getElementById('resumeDZ'), resumeInput, resumeList);
+  wireDrop(document.getElementById('jdDZ'), jdInput, jdList);
 
-      setBusy(true);
-      results.innerHTML = '<div class="hint">Matching…</div>';
-      try{
-        // 1) Upload resumes
-        const fdR = new FormData();
-        for(const f of resumeInput.files) fdR.append("resume_files", f);
-        log("Uploading resumes…");
-        await postForm("/upload_resumes", fdR);
-        log("✔ Resumes uploaded.");
-
-        // 2) Upload JDs
-        const fdJ = new FormData();
-        for(const f of jdInput.files) fdJ.append("jd_files", f);
-        log("Uploading job descriptions…");
-        await postForm("/upload_jds", fdJ);
-        log("✔ JDs uploaded.");
-
-        // 3) Call /match (no files in this call)
-        const minPct   = parseFloat($("#minPct").value || "0");
-        const minSkills= parseInt($("#minSkills").value || "0", 10);
-        const sortBy   = $("#sortBy").value === "asc" ? "score_asc" : "score_desc";
-
-        log("Computing matches…");
-        const resp = await fetch(`/match?min_match_pct=${encodeURIComponent(minPct)}&min_skills=${encodeURIComponent(minSkills)}&sort_by=${encodeURIComponent(sortBy)}`, { method:"POST" });
-        if(!resp.ok) throw new Error(await resp.text());
-
-        const data = await resp.json().catch(()=>({}));
-        const html = data && data.html ? data.html : null;
-
-        if (html){
-          results.innerHTML = html;
-        }else{
-          // Fallback simple renderer if backend returned JSON list instead of HTML
-          const payload = (data && (data.results || data.matches)) || [];
-          if(!payload.length){
-            results.innerHTML = '<div class="warn">No matches found. Try lowering filters.</div>';
-          }else{
-            results.innerHTML = payload.map(row=>{
-              const ms = Array.isArray(row.matched_skills) ? row.matched_skills : (row.matched_skills||"").split(",").map(s=>s.trim()).filter(Boolean);
-              const us = Array.isArray(row.unmatched_skills) ? row.unmatched_skills : (row.unmatched_skills||"").split(",").map(s=>s.trim()).filter(Boolean);
-              return `
-                <div class="result">
-                  <div class="score">Score: ${row.match_score ?? row.score ?? 0}/100</div>
-                  <div class="hint">${row.resume_name || row.resume_file || "Resume"} → ${row.jd_name || row.jd_file || "JD"}</div>
-                  <div style="margin-top:8px">
-                    <div class="ok">Matched</div>
-                    ${ms.length ? ms.map(s=>`<span class="tag">${s}</span>`).join("") : '<div class="hint">—</div>'}
-                  </div>
-                  <div style="margin-top:8px">
-                    <div class="warn">Unmatched</div>
-                    ${us.length ? us.map(s=>`<span class="tag">${s}</span>`).join("") : '<div class="hint">—</div>'}
-                  </div>
-                </div>
-              `;
-            }).join("");
-          }
-        }
-        log("✔ Matching complete.");
-      }catch(e){
-        console.error(e);
-        results.innerHTML = `<div class="err">Error: ${e.message}</div>`;
-        log(`<span class="err">✖ ${e.message}</span>`);
-      }finally{
-        setBusy(false);
+  function parseResultTable(html){
+    const tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    const rows = [...tmp.querySelectorAll('tr')].slice(1).map(tr => {
+      const t = [...tr.children];
+      const matched = (t[4].innerText || '').split(',').map(s => s.trim()).filter(Boolean);
+      return {
+        jd:      t[0].innerText,
+        score:   parseFloat((t[1].innerText || '0').replace('%','')),
+        rLoc:    t[2].innerText,
+        jLoc:    t[3].innerText,
+        matched,
+        missing: (t[5].innerText || '').split(',').map(s => s.trim()).filter(Boolean),
+        eduJobGap: t[6].innerText,
+        eduPeriods: t[7].innerHTML,
+        expPeriods: t[8].innerHTML,
+        eduGaps: t[9].innerHTML,
+        expGaps: t[10].innerHTML
       }
     });
+    return rows;
+  }
 
-    // CSV download
-    $("#csvBtn").addEventListener("click", async ()=>{
-      setBusy(true);
-      try{
-        const r = await fetch("/download_csv");
-        if(!r.ok) throw new Error("CSV not available yet. Please run a match first.");
-        const blob = await r.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "matches.csv"; a.click();
-        URL.revokeObjectURL(url);
-      }catch(e){
-        alert(e.message);
-      }finally{
-        setBusy(false);
+  function renderCards(perResume){
+    const results = document.getElementById('results');
+    results.innerHTML = '';
+    perResume.forEach(r => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      if (!r.rows.length) {
+        card.textContent = `⚠️ No matches for ${r.name} after filters.`;
+        results.appendChild(card);
+        return;
       }
+      const top = r.rows[0];
+      card.innerHTML = `
+        <h3>${top.jd} (${top.score.toFixed(2)}%)</h3>
+        <p><b>Matched Skills:</b> ${top.matched.length ? top.matched.map(s=>`<span class="badge">${s}</span>`).join(' ') : '—'}</p>
+        <details><summary><b>Education Periods</b></summary><p>${top.eduPeriods || '—'}</p></details>
+        <details><summary><b>Experience Periods</b></summary><p>${top.expPeriods || '—'}</p></details>
+        <details><summary><b>Education Gaps</b></summary><p>${top.eduGaps || '—'}</p></details>
+        <details><summary><b>Experience Gaps</b></summary><p>${top.expGaps || '—'}</p></details>
+        <p><b>Edu → First Job Gap:</b> ${top.eduJobGap || '—'}</p>
+      `;
+      results.appendChild(card);
     });
-  </script>
+  }
+
+  async function runMatch(){
+    const resumes = resumeInput.files;
+    const jds     = jdInput.files;
+    if (!resumes.length) return alert('Please upload at least one resume.');
+    if (!jds.length)     return alert('Please upload at least one JD.');
+
+    statusEl.textContent = 'processing…';
+    const minPct    = parseFloat($('#minPct').value || '0');
+    const minSkills = parseInt($('#minSkills').value || '0', 10);
+    const sortBy    = $('#sortBy').value;
+
+    const formDatas = [];
+    for (const res of resumes) {
+      const fd = new FormData();
+      fd.append('resume', res);
+      for (const jd of jds) fd.append('jd_files', jd);
+      formDatas.push(fd);
+    }
+
+    try {
+      const tables = await Promise.all(
+        formDatas.map(fd => fetch('/upload', { method: 'POST', body: fd }).then(r => r.text()))
+      );
+      const parsed = tables.map((html, idx) => {
+        const rows = parseResultTable(html)
+          .filter(r => r.score >= minPct && r.matched.length >= minSkills);
+        rows.sort((a,b)=> sortBy==='desc' ? b.score - a.score : a.score - b.score);
+        return { name: resumes[idx].name, rows };
+      });
+      renderCards(parsed);
+      statusEl.textContent = 'ready';
+    } catch (e) {
+      console.error(e);
+      statusEl.textContent = 'error';
+      alert('Something went wrong while matching. Check console for details.');
+    }
+  }
+
+  $('#matchBtn').addEventListener('click', runMatch);
+
+  $('#csvBtn').addEventListener('click', async () => {
+    if (!resumeInput.files.length || !jdInput.files.length) {
+      alert('Upload a resume and at least one JD first.'); return;
+    }
+    const fd = new FormData();
+    fd.append('resume', resumeInput.files[0]);
+    for (const jd of jdInput.files) fd.append('jd_files', jd);
+    const resp = await fetch('/download_csv', { method: 'POST', body: fd });
+    const blob = await resp.blob();
+    const url  = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'resume_match_results.csv'; a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // mark UI ready
+  statusEl.textContent = 'ready';
+})();
+</script>
 </body>
 </html>
