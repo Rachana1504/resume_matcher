@@ -1,168 +1,143 @@
 # app_main.py
-import io
-import csv
-import shutil
-from pathlib import Path
+from __future__ import annotations
+
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from matcher import match_resume_to_jds
-from jd_cache import load_or_build_jd_cache, build_jd_cache_from_uploads
+# Your existing matcher helpers
+from matcher import match_resume_to_jds, as_html_table, as_csv  # type: ignore
 
-APP_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = APP_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+# ──────────────────────────────────────────────────────────────────────────────
+# App setup
+# ──────────────────────────────────────────────────────────────────────────────
+app = FastAPI(title="Resume↔JD Matching Plugin", version="ui v2025-08-21")
 
-app = FastAPI(title="Resume–JD Matching Plugin")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # tighten later if you want
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def _serve_app_html() -> HTMLResponse:
-    html = (APP_DIR / "app.html").read_text(encoding="utf-8")
-    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilities
+# ──────────────────────────────────────────────────────────────────────────────
+def _normalize(files: Optional[List[UploadFile]] | Optional[UploadFile]) -> List[UploadFile]:
+    """
+    Accept a single UploadFile or a list[UploadFile] (or None) and
+    return a clean list[UploadFile].
+    """
+    if files is None:
+        return []
+    if isinstance(files, list):
+        return [f for f in files if f is not None]
+    return [files]
 
+async def _to_docs(files: List[UploadFile]) -> List[dict]:
+    """
+    Turn UploadFile objects into the simple structure many matcher functions use:
+       [{"name": "foo.pdf", "bytes": b"..."}]
+    (Your matcher may only need the bytes or text; adapt there as desired.)
+    """
+    docs: List[dict] = []
+    for f in files:
+        content = await f.read()
+        docs.append({"name": f.filename or "file", "bytes": content})
+    return docs
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Routes
+# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return _serve_app_html()
-
-@app.get("/upload", response_class=HTMLResponse)
-def upload_page():
-    # legacy path, same UI
-    return _serve_app_html()
+def home() -> HTMLResponse:
+    """Serve the single-page UI."""
+    try:
+        with open("app.html", "r", encoding="utf-8") as fp:
+            return HTMLResponse(fp.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            "<h1>Resume–JD Matching Plugin</h1><p>app.html not found next to app_main.py.</p>",
+            status_code=200,
+        )
 
 @app.get("/healthz", response_class=PlainTextResponse)
-def health():
-    return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
+def healthz() -> str:
+    return "ok"
 
-# Build fallback JD cache from local folder (once per process)
-jd_cache_fallback = load_or_build_jd_cache(
-    jd_dir=str(APP_DIR / "Dummy_data" / "JDS"),
-    cache_path=str(APP_DIR / "Dummy_data" / "jd_cache.json"),
-)
+@app.post("/match")
+async def match_endpoint(
+    # Resumes: allow single or list and multiple possible field names
+    resume_files: Optional[List[UploadFile]] = File(None),
+    resume_file: Optional[UploadFile] = File(None),
+    resumes: Optional[List[UploadFile]] = File(None),
 
-def _jd_cache_from_uploads(jd_files: Optional[List[UploadFile]]):
-    if not jd_files:
-        return None
-    named_bytes = []
-    for f in jd_files:
-        named_bytes.append((f.filename, f.file.read()))
-    return build_jd_cache_from_uploads(named_bytes)
-
-@app.post("/upload", response_class=HTMLResponse)
-async def handle_upload(
-    resume: UploadFile = File(...),
+    # JDs: allow single or list and multiple possible field names
     jd_files: Optional[List[UploadFile]] = File(None),
+    jd_file: Optional[UploadFile] = File(None),
+    jds: Optional[List[UploadFile]] = File(None),
+
+    # Filters / options from your UI
+    min_match: float = Form(0.0),
+    min_skills: int = Form(0),
+    sort_by: str = Form("score_desc"),  # "score_desc" | "score_asc" | "name" (adapt as your matcher expects)
 ):
-    # Save resume to disk
-    resume_path = str(UPLOAD_DIR / resume.filename)
-    with open(resume_path, "wb") as out:
-        shutil.copyfileobj(resume.file, out)
-
-    # Prefer uploaded JDs; fall back to prebuilt cache
-    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
-
-    # Compute matches
-    results = match_resume_to_jds(resume_path, jd_cache)
-
-    # Render as simple table (front-end maps this into cards)
-    def _join(xs): return ", ".join(xs or [])
-    def _periods_html(periods):
-        if not periods: return "—"
-        return "<br>".join(f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})" for p in periods)
-    def _gaps_html(gaps):
-        if not gaps: return "None"
-        return "<br>".join(f"{g.get('between','')} – {g.get('gap_months','')} months" for g in gaps)
-
-    rows = []
-    for r in results:
-        rows.append(f"""
-        <tr>
-          <td>{r.get('jd_file','')}</td>
-          <td>{r.get('similarity_score_percent',0)}%</td>
-          <td>{r.get('resume_location','Not Mentioned')}</td>
-          <td>{r.get('jd_location','Not Mentioned')}</td>
-          <td>{_join(r.get('matched_skills'))}</td>
-          <td>{_join(r.get('missing_skills'))}</td>
-          <td>{r.get('education_to_first_job_gap_months','N/A')} months</td>
-          <td>{_periods_html(r.get('education_periods'))}</td>
-          <td>{_periods_html(r.get('experience_periods'))}</td>
-          <td>{_gaps_html(r.get('education_gaps'))}</td>
-          <td>{_gaps_html(r.get('experience_gaps'))}</td>
-        </tr>
-        """)
-
-    table = f"""
-    <table>
-      <tr>
-        <th>JD File</th>
-        <th>Match %</th>
-        <th>Resume Location</th>
-        <th>JD Location</th>
-        <th>Matched Skills</th>
-        <th>Missing Skills</th>
-        <th>Edu → First Job Gap</th>
-        <th>Education Periods</th>
-        <th>Experience Periods</th>
-        <th>Education Gaps</th>
-        <th>Experience Gaps</th>
-      </tr>
-      {''.join(rows)}
-    </table>
     """
-    return HTMLResponse(table, headers={"Cache-Control": "no-store"})
+    Accepts resumes and JDs as single or multiple files.
+    Normalizes everything to lists before passing to the matcher.
+    """
 
-@app.post("/download_csv")
-async def download_csv(
-    resume: UploadFile = File(...),
-    jd_files: Optional[List[UploadFile]] = File(None),
-):
-    resume_path = str(UPLOAD_DIR / resume.filename)
-    with open(resume_path, "wb") as out:
-        shutil.copyfileobj(resume.file, out)
+    # Normalize all possible form fields
+    resume_list: List[UploadFile] = (
+        _normalize(resume_files) + _normalize(resume_file) + _normalize(resumes)
+    )
+    jd_list: List[UploadFile] = (
+        _normalize(jd_files) + _normalize(jd_file) + _normalize(jds)
+    )
 
-    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
-    results = match_resume_to_jds(resume_path, jd_cache)
+    if not resume_list:
+        raise HTTPException(status_code=400, detail="No resume files were uploaded.")
+    if not jd_list:
+        raise HTTPException(status_code=400, detail="No job description files were uploaded.")
 
-    output = io.StringIO()
-    w = csv.writer(output)
-    w.writerow([
-        "JD File","Match %","Resume Location","JD Location",
-        "Matched Skills","Missing Skills",
-        "Edu → First Job Gap","Education Periods","Experience Periods",
-        "Education Gaps","Experience Gaps"
-    ])
-    def _p(periods):
-        return ", ".join(f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})" for p in periods or [])
-    def _g(gaps):
-        return ", ".join(f"{g.get('between','')} – {g.get('gap_months','')} months" for g in gaps or [])
-    for r in results:
-        w.writerow([
-            r.get("jd_file",""),
-            r.get("similarity_score_percent",0),
-            r.get("resume_location",""),
-            r.get("jd_location",""),
-            ", ".join(r.get("matched_skills") or []),
-            ", ".join(r.get("missing_skills") or []),
-            r.get("education_to_first_job_gap_months",""),
-            _p(r.get("education_periods")),
-            _p(r.get("experience_periods")),
-            _g(r.get("education_gaps")),
-            _g(r.get("experience_gaps")),
-        ])
-    output.seek(0)
-    return StreamingResponse(
-        io.BytesIO(output.getvalue().encode("utf-8")),
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=resume_match_results.csv",
-            "Cache-Control": "no-store",
-        },
+    # Read bytes now (allows matcher to be pure / independent of Starlette UploadFile)
+    resume_docs = await _to_docs(resume_list)
+    jd_docs = await _to_docs(jd_list)
+
+    # Call your existing matcher. Different projects wire this differently,
+    # so we try kwargs first and fall back to args if needed.
+    try:
+        results = match_resume_to_jds(
+            resumes=resume_docs,
+            jds=jd_docs,
+            min_match=min_match,
+            min_skills=min_skills,
+            sort_by=sort_by,
+        )
+    except TypeError:
+        # Old signature compatibility:
+        results = match_resume_to_jds(resume_docs, jd_docs, min_match, min_skills, sort_by)
+
+    # Many UIs expect both table HTML and a CSV payload; adapt as your frontend expects
+    try:
+        table_html = as_html_table(results)
+    except Exception:
+        table_html = ""
+
+    try:
+        csv_text = as_csv(results)
+    except Exception:
+        csv_text = ""
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "count": len(results) if hasattr(results, "__len__") else None,
+            "table_html": table_html,
+            "csv": csv_text,
+            "data": results,  # keep the raw results too (your frontend may use them)
+        }
     )
