@@ -1,16 +1,25 @@
-fastapi==0.110.0          
+fastapi==0.111.0
 uvicorn[standard]==0.30.1
 python-multipart==0.0.9
 pydantic==2.8.2
 
+# NLP / embedding
 sentence-transformers==2.6.1
-spacy==3.7.4
-blis==0.7.11
-skillNer==1.0.3
-
-pymupdf==1.24.7
-python-docx==1.1.2
-docx2txt==0.8
 numpy==1.26.4
 scikit-learn==1.4.2
 python-dateutil==2.9.0.post0
+
+# spaCy (small model, keeps memory low)
+spacy==3.7.4
+typer==0.9.4           # satisfies spaCy (<0.10.0)
+
+# Skill extraction (pure Python)
+skillNer==1.0.3
+pandas==2.3.2
+nltk==3.9.1
+jellyfish==1.2.0
+
+# File parsing
+pymupdf==1.24.7
+python-docx==1.1.2
+docx2txt==0.8

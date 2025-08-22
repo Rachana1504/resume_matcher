@@ -1,61 +1,47 @@
-# jd_cache.py  — lazy model, safe for low-RAM and fast startup
+# jd_cache.py
+from __future__ import annotations
+import json
 from pathlib import Path
 from typing import Dict, List, Tuple
-import os, tempfile
 
-import fitz  # PyMuPDF
-import docx2txt
-from extractors import extract_text, extract_skills  # project helpers
-
-from functools import lru_cache
-@lru_cache(maxsize=1)
-def _sbert():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer("all-MiniLM-L6-v2")
-
-def build_jd_cache(jd_dir: str, cache_path: str) -> Dict[str, dict]:
-    jd_dir = Path(jd_dir)
-    cache: Dict[str, dict] = {}
-    for p in jd_dir.glob("**/*"):
-        if not p.is_file():
-            continue
-        if p.suffix.lower() not in {".txt", ".pdf", ".docx"}:
-            continue
+def _read_text_any(p: Path) -> str:
+    s = p.suffix.lower()
+    if s == ".pdf":
+        import fitz
+        doc = fitz.open(p)
         try:
-            text = extract_text(str(p))
-            skills = extract_skills(text) or []
-            emb = _sbert().encode(text, convert_to_tensor=True).tolist()
-            cache[p.name] = {"text": text, "skills": skills, "embedding": emb}
-        except Exception:
-            continue
-    Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
-    # (Optional) touch the cache path so the dir exists
-    Path(cache_path).write_text("{}")
-    return cache
+            return "\n".join(page.get_text() for page in doc)
+        finally:
+            doc.close()
+    if s == ".docx":
+        import docx2txt
+        return docx2txt.process(str(p)) or ""
+    return p.read_text(encoding="utf-8", errors="ignore")
 
 def load_or_build_jd_cache(jd_dir: str, cache_path: str) -> Dict[str, dict]:
-    return build_jd_cache(jd_dir, cache_path)
-
-def _text_from_bytes(name: str, raw: bytes) -> str:
-    ext = name.lower().rsplit(".", 1)[-1]
-    if ext == "pdf":
-        with fitz.open(stream=raw, filetype="pdf") as doc:
-            return "\n".join(page.get_text("text") for page in doc)
-    if ext == "docx":
-        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-            tmp.write(raw); tmp.flush(); path = tmp.name
+    jd_dir_path = Path(jd_dir)
+    cache_file = Path(cache_path)
+    if cache_file.exists():
         try:
-            return docx2txt.process(path) or ""
-        finally:
-            try: os.remove(path)
-            except Exception: pass
-    return raw.decode("utf-8", errors="ignore")
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    cache: Dict[str, dict] = {}
+    if jd_dir_path.exists():
+        for p in jd_dir_path.iterdir():
+            if p.is_file() and p.suffix.lower() in {".pdf",".docx",".txt"}:
+                cache[p.name] = {"text": _read_text_any(p), "location": ""}
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps(cache), encoding="utf-8")
+    return cache
 
 def build_jd_cache_from_uploads(named_bytes: List[Tuple[str, bytes]]) -> Dict[str, dict]:
-    cache: Dict[str, dict] = {}
-    for name, raw in named_bytes:
-        text = _text_from_bytes(name, raw)
-        skills = extract_skills(text) or []
-        emb = _sbert().encode(text, convert_to_tensor=True).tolist()
-        cache[name] = {"text": text, "skills": skills, "embedding": emb}
-    return cache
+    tmpdir = Path("/tmp/jd_uploads")
+    tmpdir.mkdir(exist_ok=True, parents=True)
+    out: Dict[str, dict] = {}
+    for name, data in named_bytes:
+        p = tmpdir / name
+        p.write_bytes(data)
+        out[name] = {"text": _read_text_any(p), "location": ""}
+    return out

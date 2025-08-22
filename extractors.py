@@ -1,205 +1,87 @@
 # extractors.py
-import re, fitz, docx, dateutil.parser
-from datetime import datetime
+from __future__ import annotations
+import re
+from functools import lru_cache
+from typing import Dict, List, Tuple
 
-# --- robust SkillNer imports (works across package layouts) ---
-try:
-    # Preferred explicit paths
-    from skillNer.general_params import SKILL_DB
-    from skillNer.skill_extractor_class import SkillExtractor
-except Exception:
-    # Fallbacks for older/alternate layouts
-    try:
-        from skillNer import SkillExtractor  # type: ignore
-        from skillNer.general_params import SKILL_DB  # type: ignore
-    except Exception as e:  # last resort: give a clearer error
-        raise ImportError(
-            "Could not import SkillExtractor from skillNer. "
-            "Ensure 'skillNer' is installed and available, e.g. pin skillNer==1.0.3."
-        ) from e
-
-from spacy.matcher import PhraseMatcher
 import spacy
 
-nlp = spacy.load("en_core_web_sm")
-skill_extractor = SkillExtractor(nlp, SKILL_DB, PhraseMatcher)
+# ---------- spaCy lazy loader ----------
+@lru_cache(maxsize=1)
+def get_nlp():
+    # small model to keep memory low on Render
+    return spacy.load("en_core_web_sm")
 
-# ------------------ File Readers ------------------
-def extract_text(path):
-    if path.endswith(".pdf"):
-        return "\n".join([p.get_text() for p in fitz.open(path)])
-    elif path.endswith(".docx"):
-        doc = docx.Document(path)
-        return "\n".join(p.text for p in doc.paragraphs)
-    else:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
+# ---------- SkillNer lazy loader ----------
+class SkillBackend:
+    def __init__(self):
+        self.ready = False
+        self.extractor = None
 
-# ------------------ Skill extraction (SkillNer-only) ------------------
-def extract_skills(text: str) -> list[str]:
-    """Use SkillNer to extract unique, normalized skill names from free text."""
-    doc = nlp(text)
-    out = skill_extractor.annotate(doc)
-    # out["results"]["full_matches"] and out["results"]["ngram_scored"]
-    skills = set()
+    def load(self):
+        if self.ready:
+            return
+        # Try the canonical imports for skillNer==1.0.3
+        try:
+            from skillNer.general_params import SKILL_DB  # type: ignore
+            from skillNer.skill_extractor_class import SkillExtractor  # type: ignore
+            from spacy.matcher import PhraseMatcher  # local import to avoid startup cost
+        except Exception as e:
+            # Graceful degradation: we keep running without skills rather than crashing
+            # (UI will show no matched skills).
+            self.ready = False
+            self.extractor = None
+            return
+        nlp = get_nlp()
+        self.extractor = SkillExtractor(nlp, SKILL_DB, PhraseMatcher)
+        self.ready = True
 
-    # full matches
-    for m in out.get("results", {}).get("full_matches", []):
-        name = m.get("doc_node_value") or m.get("skill_name")
-        if name:
-            skills.add(name.strip())
+    def extract(self, text: str) -> List[str]:
+        if not self.ready:
+            self.load()
+        if not self.ready or self.extractor is None:
+            return []  # no predefined keywords; simply no skill output if SkillNer missing
+        ann = self.extractor.annotate(text or "")
+        # Collect normalized skill strings from both dicts
+        skills = set()
+        for m in ann.get("results", {}).get("full_matches", []):
+            v = (m.get("doc_node_value") or "").strip().lower()
+            if v: skills.add(v)
+        for m in ann.get("results", {}).get("ngram_scored", []):
+            v = (m.get("doc_node_value") or "").strip().lower()
+            if v: skills.add(v)
+        return sorted(skills)
 
-    # n-gram scored (SkillNer’s fuzzy/partial)
-    for m in out.get("results", {}).get("ngram_scored", []):
-        name = m.get("doc_node_value") or m.get("skill_name")
-        if name:
-            skills.add(name.strip())
+skill_backend = SkillBackend()
 
-    # Deduplicate case-insensitively while keeping a pretty form
-    dedup = {}
-    for s in skills:
-        k = s.lower()
-        if k not in dedup:
-            dedup[k] = s
-    return sorted(dedup.values(), key=str.lower)
+def extract_skills(text: str) -> List[str]:
+    """Extract skills with SkillNer (no predefined keyword lists)."""
+    return skill_backend.extract(text or "")
 
-# ------------------ Experience / Education extraction helpers ------------------
-MONTH = {
-    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3, "apr": 4, "april": 4,
-    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9,
-    "sept": 9, "september": 9, "oct": 10, "october": 10, "nov": 11, "november": 11,
-    "dec": 12, "december": 12
-}
+# ---------- Dates / periods ----------
+MONTHS = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)"
+DATE_RE = re.compile(
+    rf"(?P<start>(?:{MONTHS})\s+\d{{4}}|\d{{2}}/\d{{4}}|\d{{4}})\s*(?:-|to|–|—|—>)\s*(?P<end>(?:{MONTHS})\s+\d{{4}}|\d{{2}}/\d{{4}}|\d{{4}}|present|current|ongoing)",
+    re.IGNORECASE
+)
 
-SEASON = {"spring": 3, "summer": 6, "fall": 9, "autumn": 9, "winter": 12}
+def extract_periods(text: str) -> List[Dict[str, str]]:
+    """Returns all detected periods in order of appearance."""
+    periods: List[Dict[str, str]] = []
+    for m in DATE_RE.finditer(text or ""):
+        start = m.group("start")
+        end = m.group("end")
+        snippet = text[max(0, m.start()-80): m.end()+80].splitlines()[0][:160]
+        periods.append({"entry": snippet.strip(), "start": start, "end": end})
+    return periods
 
-DATE_WORD = r"(?:\d{4}|Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|spring|summer|fall|autumn|winter)"
-
-def _to_dt(month_word: str | None, year: int | None) -> datetime | None:
-    if not year:
-        return None
-    if month_word:
-        m = MONTH.get(month_word.lower())
-        if not m:
-            m = SEASON.get(month_word.lower(), 1)
-    else:
-        m = 1
-    try:
-        return datetime(year, m, 1)
-    except Exception:
-        return None
-
-def parse_date_range(line: str) -> tuple[datetime | None, datetime | None]:
-    """
-    Parse flexible ranges like:
-      - Jan 2020 – Mar 2022
-      - 2021 to Present
-      - Summer 2019 — Winter 2020
-      - 2018-2020
-    Returns (start_dt, end_dt) where None means unknown/present.
-    """
-    s = line.strip()
-
-    # normalize separators
-    s = re.sub(r"[–—\-to]+", "-", s, flags=re.I)
-
-    # capture potential month + year tokens
-    tokens = re.findall(
-        rf"({DATE_WORD})\s*(\d{{4}})?", s, flags=re.I
-    )
-
-    # find "present/current"
-    if re.search(r"\b(present|current|now)\b", s, flags=re.I):
-        end_year = None
-        end_month = None
-    else:
-        # try to read the last year in the string as end
-        years = [int(y) for y in re.findall(r"\b(19\d{2}|20\d{2})\b", s)]
-        end_year = years[-1] if years else None
-        end_month = None
-        # if we saw an explicit month right before last year, use it
-        m = re.search(rf"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|spring|summer|fall|autumn|winter)\s+(19\d{{2}}|20\d{{2}})\D*$", s, flags=re.I)
-        if m:
-            end_month = m.group(1)
-
-    # try to read the first year in the string as start
-    years = [int(y) for y in re.findall(r"\b(19\d{2}|20\d{2})\b", s)]
-    start_year = years[0] if years else None
-
-    # if there is a month before the first year, use it
-    m = re.search(
-        rf"^(?:.*?)(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|spring|summer|fall|autumn|winter)\s+(19\d{{2}}|20\d{{2}})",
-        s, flags=re.I
-    )
-    start_month = m.group(1) if m else None
-
-    return _to_dt(start_month, start_year), _to_dt(end_month, end_year)
-
-def find_experience_periods(text: str) -> list[str]:
-    """
-    Extract all lines that look like job date ranges.
-    """
-    lines = [re.sub(r"\s+", " ", L).strip() for L in text.splitlines()]
-    res: list[str] = []
-    for L in lines:
-        if re.search(r"\b(19\d{2}|20\d{2})\b", L) and re.search(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|spring|summer|fall|autumn|winter|present|current|now)\b", L, flags=re.I):
-            # require that parse_date_range recognizes it
-            sdt, edt = parse_date_range(L)
-            if sdt or edt:
-                res.append(L)
-    # de-dupe while preserving order
-    seen = set()
-    out = []
-    for r in res:
-        k = r.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(r)
-    return out
-
-def find_education_periods(text: str) -> list[str]:
-    """
-    Education date lines – similar heuristic to experience.
-    """
-    edu_tokens = r"(university|college|bachelor|master|mba|ph\.?d|school|institute|academy|degree|b\.?tech|b\.?e\.|m\.?s\.|m\.?tech)"
-    lines = [re.sub(r"\s+", " ", L).strip() for L in text.splitlines()]
-    res: list[str] = []
-    for L in lines:
-        if re.search(edu_tokens, L, flags=re.I) and re.search(r"\b(19\d{2}|20\d{2})\b", L):
-            sdt, edt = parse_date_range(L)
-            if sdt or edt:
-                res.append(L)
-    # de-dupe while preserving order
-    seen = set()
-    out = []
-    for r in res:
-        k = r.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(r)
-    return out
-
-# ------------------ Public API ------------------
-def parse_resume(path: str) -> dict:
-    """
-    Returns {
-        "text": <full text>,
-        "skills": [list of SkillNer skill names],
-        "experience_periods": [strings],
-        "education_periods": [strings],
-    }
-    """
-    text = extract_text(path)
-    return {
-        "text": text,
-        "skills": extract_skills(text),
-        "experience_periods": find_experience_periods(text),
-        "education_periods": find_education_periods(text),
-    }
-
-def parse_jd(path: str) -> dict:
-    """
-    Parse a single JD file (pdf/docx/txt) and return text + extracted skills.
-    """
-    text = extract_text(path)
-    return {"text": text, "skills": extract_skills(text)}
+def split_resume_sections(text: str) -> Tuple[str, str]:
+    """Very light heuristic split into 'education' / 'experience' parts."""
+    t = (text or "").lower()
+    edu_idx = t.find("education")
+    exp_idx = max(t.find("experience"), t.find("professional experience"))
+    if edu_idx == -1 and exp_idx == -1:
+        return "", text
+    if edu_idx != -1 and (exp_idx == -1 or edu_idx < exp_idx):
+        return text[edu_idx:exp_idx] if exp_idx != -1 else text[edu_idx:], text
+    return text[:exp_idx], text[exp_idx:]

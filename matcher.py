@@ -1,141 +1,150 @@
+# matcher.py
 from __future__ import annotations
+from typing import Dict, List
 import os
-import io
-import csv
-from typing import List, Dict, Tuple, Set
 
-from extractors import (
-    load_text_from_file,
-    extract_skills,
-    extract_periods,
-    months_gap_chain,
-)
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
-# ---------- core matching ----------
+from extractors import extract_skills, extract_periods, split_resume_sections, get_nlp
 
-def jaccard(a: Set[str], b: Set[str]) -> float:
-    if not a and not b:
-        return 0.0
-    inter = a & b
-    union = a | b
-    return 100.0 * (len(inter) / max(1, len(union)))
+# Cache the embedder
+_EMBEDDER: SentenceTransformer | None = None
 
-def summarize_periods_html(periods: List[Tuple[str,str]]) -> str:
-    if not periods:
-        return "—"
-    return "<br>".join(f"{s} — {e}" for s,e in periods)
+def _embedder() -> SentenceTransformer:
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(os.getcwd()))
+        _EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
+    return _EMBEDDER
 
-def gaps_html(gaps: List[int]) -> str:
-    if not gaps:
-        return "None"
-    return " → ".join(f"{m} months" for m in gaps)
+def _text_from_cache_entry(entry) -> str:
+    if isinstance(entry, dict):
+        return entry.get("text", "") or ""
+    return str(entry or "")
 
-def first_job_gap_months(edu_periods: List[Tuple[str,str]], exp_periods: List[Tuple[str,str]]) -> int | None:
-    if not edu_periods or not exp_periods:
-        return None
-    # last education end vs first job start
-    def _ord_end(p):  # end ordinal
-        from extractors import _to_y_m, _ym_to_ord
-        end = _to_y_m(p[1])
-        start = _to_y_m(p[0])
-        return _ym_to_ord(*(end or start or (0,1)))
-    def _ord_start(p):
-        from extractors import _to_y_m, _ym_to_ord
-        start = _to_y_m(p[0])
-        return _ym_to_ord(*(start or (0,1)))
+def _locations_from_entry(entry) -> str:
+    if isinstance(entry, dict):
+        return entry.get("location","") or ""
+    return ""
 
-    last_edu_end = sorted(edu_periods, key=_ord_end)[-1]
-    first_job_start = sorted(exp_periods, key=_ord_start)[0]
-    from extractors import _to_y_m, _ym_to_ord
-    e_end = _to_y_m(last_edu_end[1]) or _to_y_m(last_edu_end[0])
-    j_start = _to_y_m(first_job_start[0])
-    if not e_end or not j_start:
-        return None
-    return max(0, _ym_to_ord(*j_start) - _ym_to_ord(*e_end))
+def _embed(text: str) -> np.ndarray:
+    model = _embedder()
+    vec = model.encode([text or ""], normalize_embeddings=True)
+    return np.asarray(vec)
 
-def match_resume_to_jds(resume_path: str, jd_paths: List[str]) -> List[Dict]:
-    r_text = load_text_from_file(resume_path)
-    r_skills = extract_skills(r_text)
+def _score(resume_text: str, jd_text: str, resume_skills: List[str], jd_skills: List[str]) -> float:
+    v1 = _embed(resume_text)
+    v2 = _embed(jd_text)
+    emb = float(cosine_similarity(v1, v2)[0][0])  # 0..1
+    # Skill overlap (Jaccard)
+    s1, s2 = set(map(str.lower, resume_skills)), set(map(str.lower, jd_skills))
+    overlap = (len(s1 & s2) / max(1, len(s1 | s2)))
+    # Blend
+    return (0.75 * emb) + (0.25 * overlap)
 
-    # simple heuristic splits: education/experience can be anywhere; gather all periods in text
-    r_periods = extract_periods(r_text)
-    # without labeled sections, we just show all periods under both groups but keep gaps separate
-    edu_periods = r_periods
-    exp_periods = r_periods
-    edu_gaps = months_gap_chain(edu_periods)
-    exp_gaps = months_gap_chain(exp_periods)
-    edu_first_job_gap = first_job_gap_months(edu_periods, exp_periods)
+def match_resume_to_jds(resume_path: str, jd_cache: Dict[str, dict | str]) -> List[Dict]:
+    # Read resume
+    text = _read_any(resume_path)
+    resume_edu, resume_exp = split_resume_sections(text)
+    resume_periods = extract_periods(text)
+    edu_periods = extract_periods(resume_edu)
+    exp_periods = extract_periods(resume_exp)
+    # Skills (SkillNer only; if backend missing, returns [])
+    resume_skills = extract_skills(text)
 
-    rows = []
-    for jp in jd_paths:
-        j_text = load_text_from_file(jp)
-        j_skills = extract_skills(j_text)
+    # Location extraction (minimal, can be upgraded)
+    resume_loc = _guess_location(text)
 
-        matched = sorted((r_skills & j_skills))
-        missing = sorted((j_skills - r_skills))
-        score = jaccard(r_skills, j_skills)
+    results = []
+    for jd_name, jd_entry in jd_cache.items():
+        jd_text = _text_from_cache_entry(jd_entry)
+        jd_loc = _locations_from_entry(jd_entry) or _guess_location(jd_text)
 
-        rows.append({
-            "jd_name": os.path.basename(jp),
-            "score": round(score, 2),
-            "resume_loc": "",  # (placeholder columns your UI expects)
-            "jd_loc": "",
-            "matched": matched,
-            "missing": missing,
-            "edu_first_job_gap": f"{edu_first_job_gap} months" if edu_first_job_gap is not None else "—",
-            "edu_periods_html": summarize_periods_html(edu_periods),
-            "exp_periods_html": summarize_periods_html(exp_periods),
-            "edu_gaps_html": gaps_html(edu_gaps),
-            "exp_gaps_html": gaps_html(exp_gaps),
+        jd_skills = extract_skills(jd_text)
+
+        score = _score(text, jd_text, resume_skills, jd_skills)
+        matched = sorted(set(map(str.lower, resume_skills)) & set(map(str.lower, jd_skills)))
+        missing = sorted(set(map(str.lower, jd_skills)) - set(map(str.lower, resume_skills)))
+
+        results.append({
+            "jd_file": jd_name,
+            "similarity_score_percent": round(score * 100, 1),
+            "resume_location": resume_loc or "Not Mentioned",
+            "jd_location": jd_loc or "Not Mentioned",
+            "matched_skills": matched,
+            "missing_skills": missing,
+            "education_to_first_job_gap_months": _edu_to_first_job_gap_months(edu_periods, exp_periods),
+            "education_periods": edu_periods or [],
+            "experience_periods": exp_periods or resume_periods or [],
+            "education_gaps": _gaps(edu_periods),
+            "experience_gaps": _gaps(exp_periods),
         })
-    # high → low
-    rows.sort(key=lambda r: r["score"], reverse=True)
-    return rows
 
-# ---------- renderers ----------
+    results.sort(key=lambda r: r["similarity_score_percent"], reverse=True)
+    return results
 
-def as_html_table(rows: List[Dict]) -> str:
-    cols = [
-        "JD Name","Score %","Resume Loc","JD Loc",
-        "Matched Skills","Missing Skills","Edu → First Job Gap",
-        "Education Periods","Experience Periods","Education Gaps","Experience Gaps",
-    ]
-    html = io.StringIO()
-    w = html.write
-    w("<table><thead><tr>")
-    for c in cols: w(f"<th>{c}</th>")
-    w("</tr></thead><tbody>")
-    for r in rows:
-        w("<tr>")
-        w(f"<td>{r['jd_name']}</td>")
-        w(f"<td>{r['score']}</td>")
-        w(f"<td>{r['resume_loc']}</td>")
-        w(f"<td>{r['jd_loc']}</td>")
-        w(f"<td>{', '.join(r['matched'])}</td>")
-        w(f"<td>{', '.join(r['missing'])}</td>")
-        w(f"<td>{r['edu_first_job_gap']}</td>")
-        w(f"<td>{r['edu_periods_html']}</td>")
-        w(f"<td>{r['exp_periods_html']}</td>")
-        w(f"<td>{r['edu_gaps_html']}</td>")
-        w(f"<td>{r['exp_gaps_html']}</td>")
-        w("</tr>")
-    w("</tbody></table>")
-    return html.getvalue()
+# ----------------- helpers -----------------
+def _read_any(path: str) -> str:
+    p = path.lower()
+    if p.endswith(".pdf"):
+        import fitz
+        doc = fitz.open(path)
+        try:
+            txt = "\n".join(page.get_text() for page in doc)
+        finally:
+            doc.close()
+        return txt
+    if p.endswith(".docx"):
+        import docx2txt
+        return docx2txt.process(path) or ""
+    # plaintext
+    return Path(path).read_text(encoding="utf-8", errors="ignore")
 
-def as_csv(rows: List[Dict]) -> bytes:
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow([
-        "jd_name","score","resume_loc","jd_loc",
-        "matched_skills","missing_skills","edu_first_job_gap",
-        "education_periods","experience_periods","education_gaps","experience_gaps",
-    ])
-    for r in rows:
-        writer.writerow([
-            r["jd_name"], r["score"], r["resume_loc"], r["jd_loc"],
-            "; ".join(r["matched"]), "; ".join(r["missing"]), r["edu_first_job_gap"],
-            r["edu_periods_html"].replace("<br>", " | "),
-            r["exp_periods_html"].replace("<br>", " | "),
-            r["edu_gaps_html"], r["exp_gaps_html"],
-        ])
-    return out.getvalue().encode("utf-8")
+from pathlib import Path
+import re
+
+LOC_RE = re.compile(r"\b([A-Z][a-z]+(?:[ ,][A-Z][a-z]+)*)\b[, ]+\b([A-Z]{2,})\b")
+def _guess_location(text: str) -> str | None:
+    m = LOC_RE.search(text or "")
+    if m: 
+        return m.group(0)
+    return None
+
+def _months(s: str) -> int | None:
+    # crude month/year to absolute month index
+    s = (s or "").lower()
+    if "present" in s or "current" in s or "ongoing" in s:
+        return None
+    m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)", s)
+    y = re.search(r"(19|20)\d{2}", s)
+    if not y:
+        return None
+    year = int(y.group(0))
+    month = 1
+    if m:
+        month = ["jan","feb","mar","apr","may","jun","jul","aug","sep","sept","oct","nov","dec"].index(m.group(1)) + 1
+        if month > 12: month = 9  # 'sept' maps to 9 above
+    return year*12 + month
+
+def _gaps(periods: List[Dict]) -> List[Dict]:
+    # sort by start
+    times = []
+    for p in periods or []:
+        s = _months(p.get("start","")); e = _months(p.get("end","")) or _months("present 2099")
+        if s: times.append((s,e,p))
+    times.sort(key=lambda x: x[0])
+    gaps = []
+    for (_, e_prev, p_prev), (s, e, p) in zip(times, times[1:]):
+        if s > e_prev:
+            gaps.append({"between": f"{p_prev.get('entry','')} → {p.get('entry','')}", "gap_months": s - e_prev})
+    return gaps
+
+def _edu_to_first_job_gap_months(edu_periods: List[Dict], exp_periods: List[Dict]) -> int | str:
+    if not edu_periods or not exp_periods: return "N/A"
+    edu_end = max((_months(p.get("end","")) or 0) for p in edu_periods)
+    first_job = min((_months(p.get("start","")) or 0) for p in exp_periods)
+    if edu_end and first_job and first_job >= edu_end:
+        return first_job - edu_end
+    return "N/A"
