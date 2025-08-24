@@ -23,13 +23,13 @@
     #results{margin-top:12px}
     .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:14px; box-shadow:0 8px 20px rgba(15,23,42,.06)}
     .badge{display:inline-block;background:#eef3fb;border:1px solid #dbe7f9;border-radius:999px;padding:3px 8px;margin:2px;font-size:12px}
-    table{border-collapse:collapse;width:100%}
-    th,td{border:1px solid #e8eef7;padding:8px;text-align:left}
-    .chips{margin-top:8px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .row > *{flex:1}
+    details{margin:6px 0}
   </style>
 </head>
 <body>
-<header>Resume–JD Matching Plugin <small>UI v2025-08-21</small></header>
+<header>Resume–JD Matching Plugin <small>UI v2025-08-23 (fast)</small></header>
 
 <div class="container">
   <!-- Resume uploader -->
@@ -40,7 +40,7 @@
       <label class="btn" for="resume">Choose File(s)</label>
       <input id="resume" type="file" accept=".pdf,.docx,.txt" multiple />
     </div>
-    <div id="resumeList" class="chips"></div>
+    <div id="resumeList" class="row"></div>
   </div>
 
   <div style="height:14px;"></div>
@@ -53,7 +53,7 @@
       <label class="btn" for="jdFiles">Choose JD File(s)</label>
       <input id="jdFiles" type="file" accept=".pdf,.docx,.txt" multiple />
     </div>
-    <div id="jdList" class="chips"></div>
+    <div id="jdList" class="row"></div>
   </div>
 
   <div class="controls">
@@ -65,8 +65,8 @@
         <option value="asc">Score (Low → High)</option>
       </select>
     </label>
-    <button id="matchBtn" class="btn">Match</button>
-    <button id="csvBtn" class="btn">📥 Download CSV</button>
+    <button id="matchBtn" class="btn">⚡ Quick Match (fast)</button>
+    <button id="csvBtn" class="btn">📥 Download CSV (first resume)</button>
     <span id="status" class="hint"></span>
   </div>
 
@@ -82,14 +82,15 @@
   const jdList      = $('#jdList');
   const statusEl    = $('#status');
 
+  function chip(name){
+    const s = document.createElement('span');
+    s.className = 'badge';
+    s.textContent = name;
+    return s;
+  }
   function chips(el, files){
     el.innerHTML = '';
-    [...files].forEach(f => {
-      const s = document.createElement('span');
-      s.className = 'badge';
-      s.textContent = f.name;
-      el.appendChild(s);
-    });
+    [...files].forEach(f => el.appendChild(chip(f.name)));
   }
 
   function wireDrop(zoneEl, inputEl, listEl){
@@ -103,9 +104,7 @@
       inputEl.files = dt.files;
       chips(listEl, inputEl.files);
     });
-    // Click anywhere in the drop zone to trigger the hidden input
-    zoneEl.addEventListener('click', (ev) => {
-      // prevent double-open when clicking the label
+    zoneEl.addEventListener('click', ev => {
       if (ev.target.tagName !== 'LABEL') inputEl.click();
     });
   }
@@ -115,84 +114,121 @@
   wireDrop(document.getElementById('resumeDZ'), resumeInput, resumeList);
   wireDrop(document.getElementById('jdDZ'), jdInput, jdList);
 
-  function parseResultTable(html){
-    const tmp = document.createElement('div');
-    tmp.innerHTML = html;
-    const rows = [...tmp.querySelectorAll('tr')].slice(1).map(tr => {
-      const t = [...tr.children];
-      const matched = (t[4].innerText || '').split(',').map(s => s.trim()).filter(Boolean);
-      return {
-        jd:      t[0].innerText,
-        score:   parseFloat((t[1].innerText || '0').replace('%','')),
-        rLoc:    t[2].innerText,
-        jLoc:    t[3].innerText,
-        matched,
-        missing: (t[5].innerText || '').split(',').map(s => s.trim()).filter(Boolean),
-        eduJobGap: t[6].innerText,
-        eduPeriods: t[7].innerHTML,
-        expPeriods: t[8].innerHTML,
-        eduGaps: t[9].innerHTML,
-        expGaps: t[10].innerHTML
-      }
-    });
-    return rows;
-  }
-
   function renderCards(perResume){
     const results = document.getElementById('results');
     results.innerHTML = '';
-    perResume.forEach(r => {
+    perResume.forEach(block => {
       const card = document.createElement('div');
       card.className = 'card';
-      if (!r.rows.length) {
-        card.textContent = `⚠️ No matches for ${r.name} after filters.`;
+      const title = document.createElement('h2');
+      title.textContent = `Resume: ${block.name}`;
+      card.appendChild(title);
+
+      if (!block.rows.length){
+        const p = document.createElement('p');
+        p.textContent = '⚠️ No matches after filters.';
+        card.appendChild(p);
         results.appendChild(card);
         return;
       }
-      const top = r.rows[0];
-      card.innerHTML = `
-        <h3>${top.jd} (${top.score.toFixed(2)}%)</h3>
-        <p><b>Matched Skills:</b> ${top.matched.length ? top.matched.map(s=>`<span class="badge">${s}</span>`).join(' ') : '—'}</p>
-        <details><summary><b>Education Periods</b></summary><p>${top.eduPeriods || '—'}</p></details>
-        <details><summary><b>Experience Periods</b></summary><p>${top.expPeriods || '—'}</p></details>
-        <details><summary><b>Education Gaps</b></summary><p>${top.eduGaps || '—'}</p></details>
-        <details><summary><b>Experience Gaps</b></summary><p>${top.expGaps || '—'}</p></details>
-        <p><b>Edu → First Job Gap:</b> ${top.eduJobGap || '—'}</p>
-      `;
+
+      // Build a compact table of matches per resume
+      const tbl = document.createElement('table');
+      const thead = document.createElement('thead');
+      thead.innerHTML = `
+        <tr>
+          <th>JD File</th>
+          <th>Match %</th>
+          <th>Resume Location</th>
+          <th>JD Location</th>
+          <th>Matched Skills</th>
+        </tr>`;
+      tbl.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      block.rows.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.jd}</td>
+          <td>${r.score.toFixed(2)}</td>
+          <td>${r.rLoc || '—'}</td>
+          <td>${r.jLoc || '—'}</td>
+          <td>${r.matched.map(s=>`<span class="badge">${s}</span>`).join(' ') || '—'}</td>
+        `;
+        // expandable details
+        const details = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.innerHTML = `
+          <details>
+            <summary><b>More</b> (Education/Experience & Gaps)</summary>
+            <div style="padding:6px 2px">
+              <div><b>Education Periods:</b><br>${r.eduPeriods || '—'}</div>
+              <div style="height:6px"></div>
+              <div><b>Experience Periods:</b><br>${r.expPeriods || '—'}</div>
+              <div style="height:6px"></div>
+              <div><b>Education Gaps:</b><br>${r.eduGaps || '—'}</div>
+              <div style="height:6px"></div>
+              <div><b>Experience Gaps:</b><br>${r.expGaps || '—'}</div>
+              <div style="height:6px"></div>
+              <div><b>Edu → First Job Gap:</b> ${r.eduJobGap || 'N/A'}</div>
+            </div>
+          </details>
+        `;
+        details.appendChild(td);
+        tbody.appendChild(tr);
+        tbody.appendChild(details);
+      });
+      tbl.appendChild(tbody);
+      card.appendChild(tbl);
       results.appendChild(card);
     });
   }
 
-  async function runMatch(){
+  async function runMatchFast(){
     const resumes = resumeInput.files;
     const jds     = jdInput.files;
     if (!resumes.length) return alert('Please upload at least one resume.');
     if (!jds.length)     return alert('Please upload at least one JD.');
 
     statusEl.textContent = 'processing…';
+
+    const fd = new FormData();
+    for (const r of resumes) fd.append('resumes', r);
+    for (const j of jds)     fd.append('jds', j);
+    fd.append('max_workers', '4');
+
     const minPct    = parseFloat($('#minPct').value || '0');
     const minSkills = parseInt($('#minSkills').value || '0', 10);
     const sortBy    = $('#sortBy').value;
 
-    const formDatas = [];
-    for (const res of resumes) {
-      const fd = new FormData();
-      fd.append('resume', res);
-      for (const jd of jds) fd.append('jd_files', jd);
-      formDatas.push(fd);
-    }
-
     try {
-      const tables = await Promise.all(
-        formDatas.map(fd => fetch('/upload', { method: 'POST', body: fd }).then(r => r.text()))
-      );
-      const parsed = tables.map((html, idx) => {
-        const rows = parseResultTable(html)
-          .filter(r => r.score >= minPct && r.matched.length >= minSkills);
-        rows.sort((a,b)=> sortBy==='desc' ? b.score - a.score : a.score - b.score);
-        return { name: resumes[idx].name, rows };
+      const resp = await fetch('/match-fast', { method: 'POST', body: fd });
+      const data = await resp.json(); // { mode, results: [ {resume, results:[...]} ] }
+
+      const perResume = (data.results || []).map(block => {
+        const rows = (block.results || []).map(r => ({
+          jd: r.jd_file,
+          score: parseFloat(r.similarity_score_percent || 0),
+          rLoc: r.resume_location,
+          jLoc: r.jd_location,
+          matched: r.matched_skills || [],
+          missing: r.missing_skills || [],
+          eduJobGap: (r.education_to_first_job_gap_months != null) ? (r.education_to_first_job_gap_months + ' months') : 'N/A',
+          eduPeriods: (r.education_periods || []).map(p => `${p.entry} (${p.start} — ${p.end})`).join('<br>'),
+          expPeriods: (r.experience_periods || []).map(p => `${p.entry} (${p.start} — ${p.end})`).join('<br>'),
+          eduGaps: (r.education_gaps || []).map(g => `${g.between} – ${g.gap_months} months`).join('<br>'),
+          expGaps: (r.experience_gaps || []).map(g => `${g.between} – ${g.gap_months} months`).join('<br>')
+        }));
+
+        // Apply filters & sort
+        const filtered = rows.filter(r => r.score >= minPct && r.matched.length >= minSkills);
+        filtered.sort((a,b)=> sortBy==='desc' ? b.score - a.score : a.score - b.score);
+
+        return { name: block.resume, rows: filtered };
       });
-      renderCards(parsed);
+
+      renderCards(perResume);
       statusEl.textContent = 'ready';
     } catch (e) {
       console.error(e);
@@ -201,8 +237,10 @@
     }
   }
 
-  $('#matchBtn').addEventListener('click', runMatch);
+  // Bind buttons
+  $('#matchBtn').addEventListener('click', runMatchFast);
 
+  // CSV (uses your /download_csv; exports for the first resume for now)
   $('#csvBtn').addEventListener('click', async () => {
     if (!resumeInput.files.length || !jdInput.files.length) {
       alert('Upload a resume and at least one JD first.'); return;

@@ -3,14 +3,14 @@ import io
 import csv
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from matcher import match_resume_to_jds
+from matcher import match_resume_to_jds, match_many
 from jd_cache import load_or_build_jd_cache, build_jd_cache_from_uploads
 
 APP_DIR = Path(__file__).resolve().parent
@@ -27,8 +27,19 @@ app.add_middleware(
 )
 
 def _serve_app_html() -> HTMLResponse:
-    html = (APP_DIR / "app.html").read_text(encoding="utf-8")
+    p = APP_DIR / "app.html"
+    # Safe fallback so you never see a blank page
+    if not p.exists():
+        return HTMLResponse(
+            "<!doctype html><h2>app.html not found</h2><p>Put app.html next to app_main.py.</p>",
+            headers={"Cache-Control": "no-store"},
+        )
+    html = p.read_text(encoding="utf-8")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz():
+    return "ok"
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -38,11 +49,19 @@ def index():
 def upload_page():
     return _serve_app_html()
 
-# Fallback JD cache (local dummy data) created once per process
-jd_cache_fallback = load_or_build_jd_cache(
-    jd_dir=str(APP_DIR / "Dummy_data" / "JDS"),
-    cache_path=str(APP_DIR / "Dummy_data" / "jd_cache.json"),
-)
+# -------- Lazy JD cache so startup is instant --------
+_jd_cache_fallback: Optional[dict] = None
+def _get_jd_cache_fallback() -> dict:
+    global _jd_cache_fallback
+    if _jd_cache_fallback is None:
+        try:
+            _jd_cache_fallback = load_or_build_jd_cache(
+                jd_dir=str(APP_DIR / "Dummy_data" / "JDS"),
+                cache_path=str(APP_DIR / "Dummy_data" / "jd_cache.json"),
+            )
+        except Exception:
+            _jd_cache_fallback = {}
+    return _jd_cache_fallback
 
 def _jd_cache_from_uploads(jd_files: List[UploadFile] | None):
     if not jd_files:
@@ -53,36 +72,29 @@ def _jd_cache_from_uploads(jd_files: List[UploadFile] | None):
 def _gaps_html(gaps):
     if not gaps:
         return "None"
-    return "<br>".join(
-        f"{g.get('between','')} – {g.get('gap_months','')} months" for g in gaps
-    )
+    return "<br>".join(f"{g.get('between','')} – {g.get('gap_months','')} months" for g in gaps)
 
 def _periods_html(periods):
     if not periods:
         return "—"
-    return "<br>".join(
-        f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})"
-        for p in periods
-    )
+    return "<br>".join(f"{p.get('entry','')} ({p.get('start','')} — {p.get('end','')})" for p in periods)
 
+# ---------- Original HTML workflow (one resume) ----------
 @app.post("/upload", response_class=HTMLResponse)
 async def handle_upload(
     resume: UploadFile = File(...),
     jd_files: List[UploadFile] | None = File(None),
 ):
-    """Accept one resume + optional JD files; return an HTML table for the UI."""
     # Save resume
     resume_path = str(UPLOAD_DIR / resume.filename)
     with open(resume_path, "wb") as out:
         shutil.copyfileobj(resume.file, out)
 
-    # Prefer uploaded JDs; fallback to local cache only if none uploaded
-    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
+    # Prefer uploaded JDs; fallback only if none uploaded
+    jd_cache = _jd_cache_from_uploads(jd_files) or _get_jd_cache_fallback()
 
-    # Run matching
     results = match_resume_to_jds(resume_path, jd_cache)
 
-    # Render as a simple HTML table that the front-end parses into cards
     rows_html = []
     for r in results:
         rows_html.append(f"""
@@ -126,18 +138,13 @@ async def download_csv(
     resume: UploadFile = File(...),
     jd_files: List[UploadFile] | None = File(None),
 ):
-    # Save resume
     resume_path = str(UPLOAD_DIR / resume.filename)
     with open(resume_path, "wb") as out:
         shutil.copyfileobj(resume.file, out)
 
-    # Prefer uploaded JDs; fallback to local
-    jd_cache = _jd_cache_from_uploads(jd_files) or jd_cache_fallback
-
-    # Run matching
+    jd_cache = _jd_cache_from_uploads(jd_files) or _get_jd_cache_fallback()
     results = match_resume_to_jds(resume_path, jd_cache)
 
-    # Stream CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
@@ -160,7 +167,6 @@ async def download_csv(
             ", ".join(f"{g.get('between','')} – {g.get('gap_months','')} months" for g in (r.get("education_gaps") or [])),
             ", ".join(f"{g.get('between','')} – {g.get('gap_months','')} months" for g in (r.get("experience_gaps") or [])),
         ])
-
     output.seek(0)
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode("utf-8")),
@@ -171,5 +177,39 @@ async def download_csv(
         },
     )
 
+# ---------- FAST parallel endpoint (multi resume × multi JD) ----------
+@app.post("/match-fast")
+async def match_fast(
+    resumes: List[UploadFile] = File(...),
+    jds: List[UploadFile] = File(...),
+    max_workers: int = Form(4)
+):
+    """
+    Saves uploads into temp files; uses cached extraction + parallelism.
+    Returns JSON the UI renders into cards.
+    """
+    import tempfile, os
+    tmpdir = tempfile.mkdtemp(prefix="matchfast_")
+    try:
+        resume_paths, jd_paths = [], []
+
+        for uf in resumes:
+            rp = os.path.join(tmpdir, uf.filename)
+            with open(rp, "wb") as w:
+                w.write(await uf.read())
+            resume_paths.append(rp)
+
+        for uf in jds:
+            jp = os.path.join(tmpdir, uf.filename)
+            with open(jp, "wb") as w:
+                w.write(await uf.read())
+            jd_paths.append(jp)
+
+        results = match_many(resume_paths, jd_paths, fast=True, max_workers=max_workers)
+        return {"mode": "fast", "results": results}
+    finally:
+        # (optional) clean up tmpdir later; keeping for debugging is fine
+        pass
+
 if __name__ == "__main__":
-    uvicorn.run("app_main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app_main:app", host="127.0.0.1", port=8001, reload=False)

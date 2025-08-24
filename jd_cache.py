@@ -1,4 +1,3 @@
-# jd_cache.py
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -45,3 +44,16 @@ def build_jd_cache_from_uploads(named_bytes: List[Tuple[str, bytes]]) -> Dict[st
         p.write_bytes(data)
         out[name] = {"text": _read_text_any(p), "location": ""}
     return out
+
+# --------- Fast text accessor (added) ----------
+from functools import lru_cache
+
+@lru_cache(maxsize=512)
+def get_jd_text_fast(path_str: str) -> str:
+    """Use extractors.extract_text_fast if present; else fall back."""
+    try:
+        from extractors import extract_text_fast
+        return extract_text_fast(path_str)
+    except Exception:
+        from extractors import extract_text
+        return extract_text(path_str)

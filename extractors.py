@@ -1,4 +1,3 @@
-# extractors.py
 import re
 from datetime import datetime
 from functools import lru_cache
@@ -7,6 +6,8 @@ from typing import List, Tuple, Dict, Any
 import fitz  # PyMuPDF
 import docx
 from dateutil import parser as dparser
+from datetime import datetime as _DT_
+import os  # (added for caching below)
 
 # ---------- Lazy SkillNer (no predefined keyword lists) ----------
 @lru_cache(maxsize=1)
@@ -36,6 +37,21 @@ def extract_text(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
+# ----- Cached file key & cached extract (added, non-invasive) -----
+def _file_cache_key(path: str) -> tuple:
+    try:
+        st = os.stat(path)
+        return (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    except Exception:
+        return (os.path.abspath(path), 0, 0)
+
+@lru_cache(maxsize=512)
+def extract_text_cached(key: tuple) -> str:
+    return extract_text(key[0])
+
+def extract_text_fast(path: str) -> str:
+    return extract_text_cached(_file_cache_key(path))
+
 # ---------- Skills (SkillNer only) ----------
 def extract_skills(text: str) -> List[str]:
     try:
@@ -56,6 +72,31 @@ def extract_skills(text: str) -> List[str]:
         return sorted({s.strip() for s in vals if s})
     except Exception:
         return []
+
+# ----- FAST skills (added, optional) -----
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9\+\.#-]{1,}")
+STOP = set("""
+a an the and or for with of on in to from by about into over than after before during under again further then once here there all any both each few more most other some such no nor not only own same so too very
+""".split())
+
+@lru_cache(maxsize=512)
+def extract_skills_fast(text: str) -> list[str]:
+    tokens = _WORD.findall(text or "")
+    cand = []
+    for t in tokens:
+        k = t.strip().strip(".,;:()[]{}").lower()
+        if not k or k in STOP:
+            continue
+        if any(ch.isupper() for ch in t) or any(ch.isdigit() for ch in t) or len(k) >= 3:
+            cand.append(t.strip())
+    seen = set()
+    out = []
+    for c in cand:
+        ck = re.sub(r"[^a-z0-9]+", "", c.lower())
+        if ck and ck not in seen:
+            seen.add(ck)
+            out.append(c)
+    return out
 
 def normalize_skills(skills: List[str]) -> set:
     out = set()
@@ -152,6 +193,48 @@ def education_to_first_job_gap(edu, exp) -> int | None:
     return _months_between(last_edu_end, first_job_start)
 
 HEADERS = ["education","experience","work experience","professional experience","projects","skills","certifications","achievements"]
+
+# -------- Season Date Support (already integrated) --------
+_SEASON_TO_MONTH = {
+    "winter": 1,
+    "spring": 2,
+    "summer": 6,
+    "fall":   9,
+    "autumn": 9,
+}
+_SEASON_TOKEN_RE = re.compile(r"(?i)\b(winter|spring|summer|fall|autumn)\s+(\d{4})\b")
+
+def _normalize_season_terms(_s: str) -> str:
+    def _repl(m: re.Match) -> str:
+        season = m.group(1).lower()
+        year   = m.group(2)
+        month  = _SEASON_TO_MONTH.get(season, 1)
+        _MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+        month_name = _MONTH_NAMES[month-1]
+        return f"{month_name} {year}"
+    return _SEASON_TOKEN_RE.sub(_repl, _s or "")
+
+try:
+    _ORIG__PARSE_DATE = _parse_date
+except NameError:
+    _ORIG__PARSE_DATE = None
+
+if _ORIG__PARSE_DATE is not None:
+    def _parse_date(s: str):  # noqa: F811
+        s_norm = _normalize_season_terms(s)
+        dt = _ORIG__PARSE_DATE(s_norm)
+        if dt is not None:
+            return dt
+        m = _SEASON_TOKEN_RE.search(s or "")
+        if m:
+            season = m.group(1).lower()
+            year   = int(m.group(2))
+            month  = _SEASON_TO_MONTH.get(season, 1)
+            try:
+                return _DT_(year, month, 1)
+            except Exception:
+                pass
+        return _ORIG__PARSE_DATE(s)
 
 def _split_sections(text: str) -> Dict[str, List[str]]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
