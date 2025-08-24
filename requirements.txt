@@ -1,28 +1,11 @@
-# --- API stack ---
 fastapi==0.110.3
-starlette==0.37.2
-uvicorn==0.30.1
+uvicorn[standard]==0.30.1
 python-multipart==0.0.9
-pydantic==2.8.2
-typing-extensions==4.12.2
-
-# --- NLP / ML ---
-sentence-transformers==2.6.1
-torch==2.2.2          # CPU wheel; avoids huge 2.8.0 pulls
-numpy==1.26.4
-scikit-learn==1.4.2
-
-# --- spaCy + SkillNer ---
+jinja2==3.1.4
+pydantic==2.7.4
 spacy==3.7.4
-blis==0.7.11
-skillNer==1.0.3
-typer==0.9.4          # <- required by spaCy (<0.10)
-pandas==2.3.2
-nltk==3.9.1
-jellyfish==1.2.0
-
-# --- document parsing ---
-PyMuPDF==1.24.7
-python-docx==1.1.2
-docx2txt==0.8
-python-dateutil==2.9.0.post0
+sentence-transformers==2.6.1
+# CPU torch wheel (works on Render free):
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2
+scikit-learn==1.4.2
